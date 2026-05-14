@@ -102,3 +102,5 @@ script             SQL files, Docker Compose files, and helper scripts
 ## Framework Source
 
 This project is adapted from the RuoYi-Vue-Plus backend framework. Source details are recorded in `PATROLLINK_SOURCE.md`.
+
+The original RuoYi-Vue-Plus backend README is preserved in `README.ruoyi.md`.

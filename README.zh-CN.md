@@ -102,3 +102,5 @@ script             SQL、Docker Compose 和辅助脚本
 ## 框架来源
 
 本项目基于 RuoYi-Vue-Plus 后端框架改造。来源信息记录在 `PATROLLINK_SOURCE.md`。
+
+原始 RuoYi-Vue-Plus 后端 README 已保留在 `README.ruoyi.md`。
