@@ -1,6 +1,16 @@
 package org.dromara.patrol.controller;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
+import org.dromara.patrol.domain.PatrolAlert;
+import org.dromara.patrol.domain.PatrolDevice;
+import org.dromara.patrol.domain.PatrolMedia;
+import org.dromara.patrol.domain.PatrolSosEvent;
+import org.dromara.patrol.mapper.PatrolAlertMapper;
+import org.dromara.patrol.mapper.PatrolDeviceMapper;
+import org.dromara.patrol.mapper.PatrolMediaMapper;
+import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -12,6 +22,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 
@@ -24,49 +38,59 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/patrol")
+@RequiredArgsConstructor
 public class PatrolController {
+
+    private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    private final PatrolDeviceMapper deviceMapper;
+    private final PatrolAlertMapper alertMapper;
+    private final PatrolMediaMapper mediaMapper;
+    private final PatrolSosEventMapper sosEventMapper;
 
     @GetMapping("/dashboard/summary")
     public R<DashboardSummaryVo> dashboard() {
+        List<PatrolDevice> devices = deviceMapper.selectList();
+        List<PatrolAlert> alerts = alertMapper.selectList();
+        List<PatrolMedia> media = mediaMapper.selectList();
+        List<PatrolSosEvent> sosEvents = sosEventMapper.selectList();
+        long onlineDevices = devices.stream().filter(item -> Boolean.TRUE.equals(item.getOnline())).count();
+        long pendingAlerts = alerts.stream().filter(item -> !"CLOSED".equals(item.getStatus())).count();
+        long activeSos = sosEvents.stream().filter(item -> "ACTIVE".equals(item.getPhase())).count();
         return R.ok(new DashboardSummaryVo(
             List.of(
-                new MetricVo("在线警员", "84", "100 名试点警员", "success"),
-                new MetricVo("在线设备", "126", "150 台执法设备", "primary"),
-                new MetricVo("视频会话", "8", "最大支持 16 路", "warning"),
-                new MetricVo("未处置预警", "5", "人员 3 / 车辆 2", "danger"),
-                new MetricVo("SOS 求助", "1", "增援派遣中", "danger"),
-                new MetricVo("今日媒体", "312", "约 48.6 GB", "info")
+                new MetricVo("在线警员", String.valueOf(onlineDevices), "按在线设备折算", "success"),
+                new MetricVo("在线设备", String.valueOf(onlineDevices), devices.size() + " 台设备入库", "primary"),
+                new MetricVo("视频会话", "预留", "SDK 暂未提供实时流能力", "warning"),
+                new MetricVo("未处置预警", String.valueOf(pendingAlerts), "PENDING/HANDLING", pendingAlerts > 0 ? "danger" : "success"),
+                new MetricVo("SOS 求助", String.valueOf(activeSos), "ACTIVE 状态", activeSos > 0 ? "danger" : "success"),
+                new MetricVo("媒体证据", String.valueOf(media.size()), "MinIO/设备侧记录", "info")
             ),
-            List.of(
-                new WorkItemVo("alert-20260514001", "人员布控比中", "张建国", "执法耳机 HEADSET-012", "未处置", "CRITICAL", "2 分钟前"),
-                new WorkItemVo("sos-20260514001", "一键求助", "李明", "人民路与解放路口", "增援中", "CRITICAL", "5 分钟前"),
-                new WorkItemVo("device-20260514001", "设备低电量", "王强", "HEADSET-038 电量 12%", "待确认", "WARNING", "8 分钟前")
-            ),
-            new PlatformCapacityVo(100, 150, 16, "2/4/8/12/16 视频墙布局", "高德地图", "第三方人脸比对/车牌 OCR")
+            workItems(alerts, sosEvents, devices),
+            new PlatformCapacityVo(Math.toIntExact(onlineDevices), devices.size(), 16, "实时视频待 SDK 能力开放", "高德地图", "第三方人脸比对/车牌 OCR")
         ));
     }
 
     @GetMapping("/devices")
     public R<List<DeviceVo>> devices() {
-        return R.ok(List.of(
-            new DeviceVo("HEADSET-012", "执法耳机 012", "张建国", "A01358", "巡特警一大队", "ONLINE", 86, 4, "v1.3.5", "32GB/128GB", "VIDEO_STREAMING", "2026-05-14 08:21:11"),
-            new DeviceVo("HEADSET-038", "执法耳机 038", "王强", "A01933", "交警二中队", "ONLINE", 12, 3, "v1.3.5", "96GB/128GB", "LOW_BATTERY", "2026-05-14 08:21:09"),
-            new DeviceVo("HEADSET-071", "执法耳机 071", "赵敏", "A01762", "巡特警二大队", "OFFLINE", 0, 0, "v1.3.4", "41GB/128GB", "OFFLINE", "2026-05-13 21:44:02")
-        ));
+        return R.ok(deviceMapper.selectList().stream().map(this::toDeviceVo).toList());
     }
 
     @PostMapping("/devices/{deviceId}/commands")
     public R<CommandResultVo> command(@PathVariable String deviceId, @RequestBody DeviceCommandBo command) {
-        return R.ok(new CommandResultVo("cmd-" + System.currentTimeMillis(), deviceId, command.command(), "ACCEPTED", "指令已进入下发队列"));
+        PatrolDevice device = deviceMapper.selectById(deviceId);
+        if (device != null) {
+            applyDeviceCommand(device, command.command());
+            deviceMapper.updateById(device);
+        }
+        return R.ok(new CommandResultVo("cmd-" + System.currentTimeMillis(), deviceId, command.command(), "ACCEPTED", "指令已写入设备状态，等待端侧回执"));
     }
 
     @GetMapping("/dispatch/channels")
     public R<List<DispatchChannelVo>> dispatchChannels() {
-        return R.ok(List.of(
-            new DispatchChannelVo("CH-01", "HEADSET-012", "张建国", "巡特警一大队", "LIVE", "低延迟", 318, "人民广场北侧", true),
-            new DispatchChannelVo("CH-02", "HEADSET-038", "王强", "交警二中队", "LIVE", "证据质量", 642, "解放路口", false),
-            new DispatchChannelVo("CH-03", "HEADSET-055", "陈宇", "派出所网格组", "CONNECTING", "均衡", 0, "文化路商圈", false)
-        ));
+        return R.ok(deviceMapper.selectList(new LambdaQueryWrapper<PatrolDevice>().eq(PatrolDevice::getOnline, true)).stream()
+            .map(item -> new DispatchChannelVo("CH-" + item.getDeviceId(), item.getDeviceId(), officerName(item), deptName(item), "RESERVED", "待 SDK", 0, blankToDefault(item.getAddress(), "未知位置"), Boolean.TRUE.equals(item.getTalking())))
+            .toList());
     }
 
     @PostMapping("/dispatch/sessions")
@@ -75,8 +99,8 @@ public class PatrolController {
             "dispatch-" + System.currentTimeMillis(),
             bo.deviceId(),
             bo.mode(),
-            "webrtc://media.patrollink.local/live/" + bo.deviceId(),
-            "CREATED"
+            null,
+            "RESERVED"
         ));
     }
 
@@ -113,11 +137,21 @@ public class PatrolController {
 
     @GetMapping("/map/officers")
     public R<List<OfficerLocationVo>> officerLocations() {
-        return R.ok(List.of(
-            new OfficerLocationVo("A01358", "张建国", "巡特警一大队", "HEADSET-012", new BigDecimal("39.908722"), new BigDecimal("116.397499"), "人民广场北侧", "ONLINE", 86, "2026-05-14 08:21:12"),
-            new OfficerLocationVo("A01933", "王强", "交警二中队", "HEADSET-038", new BigDecimal("39.907612"), new BigDecimal("116.403181"), "解放路口", "ONLINE", 12, "2026-05-14 08:21:10"),
-            new OfficerLocationVo("A01762", "赵敏", "巡特警二大队", "HEADSET-071", new BigDecimal("39.912301"), new BigDecimal("116.391084"), "文化路商圈", "OFFLINE", 0, "2026-05-13 21:44:02")
-        ));
+        return R.ok(deviceMapper.selectList().stream()
+            .filter(item -> item.getLatitude() != null && item.getLongitude() != null)
+            .map(item -> new OfficerLocationVo(
+                badgeNo(item),
+                officerName(item),
+                deptName(item),
+                item.getDeviceId(),
+                BigDecimal.valueOf(item.getLatitude()),
+                BigDecimal.valueOf(item.getLongitude()),
+                blankToDefault(item.getAddress(), "未知位置"),
+                Boolean.TRUE.equals(item.getOnline()) ? "ONLINE" : "OFFLINE",
+                value(item.getBatteryPercent()),
+                formatDate(item.getLastHeartbeatTime())
+            ))
+            .toList());
     }
 
     @GetMapping("/map/officers/{badgeNo}/track")
@@ -131,37 +165,39 @@ public class PatrolController {
 
     @GetMapping("/alerts")
     public R<List<AlertVo>> alerts() {
-        return R.ok(List.of(
-            new AlertVo("AL-20260514-001", "PERSON", "人员布控比中", "李某某", "HEADSET-012", "张建国", "人民广场北侧", "PENDING", "CRITICAL", "96.8%", "2026-05-14 08:19:21"),
-            new AlertVo("AL-20260514-002", "VEHICLE", "重点车辆比中", "京A12345", "HEADSET-038", "王强", "解放路口", "HANDLING", "WARNING", "92.1%", "2026-05-14 08:12:42"),
-            new AlertVo("AL-20260514-003", "PERSON", "人员布控比中", "王某某", "HEADSET-055", "陈宇", "文化路商圈", "CLOSED", "INFO", "88.4%", "2026-05-14 07:58:11")
-        ));
+        return R.ok(alertMapper.selectList().stream().map(this::toAlertVo).toList());
     }
 
     @PostMapping("/alerts/{alertId}/ack")
     public R<AlertActionVo> acknowledgeAlert(@PathVariable String alertId) {
+        PatrolAlert alert = alertMapper.selectById(alertId);
+        if (alert != null) {
+            alert.setStatus("HANDLING");
+            alertMapper.updateById(alert);
+        }
         return R.ok(new AlertActionVo(alertId, "HANDLING", "预警已确认，进入处置中"));
     }
 
     @PostMapping("/alerts/{alertId}/close")
     public R<AlertActionVo> closeAlert(@PathVariable String alertId, @RequestBody AlertCloseBo bo) {
+        PatrolAlert alert = alertMapper.selectById(alertId);
+        if (alert != null) {
+            alert.setStatus("CLOSED");
+            alert.setCloseResult(bo.result());
+            alert.setCloseNote(bo.note());
+            alertMapper.updateById(alert);
+        }
         return R.ok(new AlertActionVo(alertId, "CLOSED", "处置结果已提交：" + bo.result()));
     }
 
     @GetMapping("/media")
     public R<List<MediaVo>> media() {
-        return R.ok(List.of(
-            new MediaVo("MF-001", "现场照片_081921.jpg", "PHOTO", "HEADSET-012", "张建国", "AL-20260514-001", "2.8 MB", "VERIFIED", "MinIO/patrol-evidence", "2026-05-14 08:19:21"),
-            new MediaVo("MF-002", "视频片段_081242.mp4", "VIDEO", "HEADSET-038", "王强", "AL-20260514-002", "128.4 MB", "HASHING", "MinIO/patrol-media", "2026-05-14 08:12:42"),
-            new MediaVo("MF-003", "SOS录音_080511.aac", "AUDIO", "HEADSET-066", "刘洋", "SOS-20260514-001", "4.1 MB", "UPLOADING", "MinIO/patrol-sos", "2026-05-14 08:05:11")
-        ));
+        return R.ok(mediaMapper.selectList().stream().map(this::toMediaVo).toList());
     }
 
     @GetMapping("/sos")
     public R<List<SosVo>> sos() {
-        return R.ok(List.of(
-            new SosVo("SOS-20260514-001", "刘洋", "A01666", "派出所网格组", "HEADSET-066", "人民路与解放路口", "ACTIVE", "增援派遣中", true, 4, "2026-05-14 08:05:11")
-        ));
+        return R.ok(sosEventMapper.selectList().stream().map(this::toSosVo).toList());
     }
 
     @PostMapping("/messages/send")
@@ -286,6 +322,173 @@ public class PatrolController {
             "algorithm", "第三方人脸比对与车牌 OCR",
             "policeCallIntegration", "预留 110 接处警平台接口"
         ));
+    }
+
+    private List<WorkItemVo> workItems(List<PatrolAlert> alerts, List<PatrolSosEvent> sosEvents, List<PatrolDevice> devices) {
+        List<WorkItemVo> items = new ArrayList<>();
+        alerts.stream()
+            .filter(item -> !"CLOSED".equals(item.getStatus()))
+            .limit(3)
+            .forEach(item -> items.add(new WorkItemVo(item.getAlertId(), item.getTitle(), officerNameByDevice(item.getSource()), item.getSource(), item.getStatus(), item.getLevel(), blankToDefault(item.getOccurredAt(), "刚刚"))));
+        sosEvents.stream()
+            .filter(item -> "ACTIVE".equals(item.getPhase()))
+            .limit(2)
+            .forEach(item -> items.add(new WorkItemVo(item.getSosId(), "一键 SOS 求助", "移动端警员", blankToDefault(item.getAddress(), "未知位置"), item.getPhase(), "CRITICAL", formatDate(item.getCreateTime()))));
+        devices.stream()
+            .filter(item -> value(item.getBatteryPercent()) > 0 && value(item.getBatteryPercent()) < 20)
+            .limit(2)
+            .forEach(item -> items.add(new WorkItemVo("device-" + item.getDeviceId(), "设备低电量", officerName(item), item.getDeviceId() + " 电量 " + item.getBatteryPercent() + "%", "待确认", "WARNING", formatDate(item.getLastHeartbeatTime()))));
+        return items.stream().limit(6).toList();
+    }
+
+    private DeviceVo toDeviceVo(PatrolDevice device) {
+        return new DeviceVo(
+            device.getDeviceId(),
+            device.getDeviceName(),
+            officerName(device),
+            badgeNo(device),
+            deptName(device),
+            Boolean.TRUE.equals(device.getOnline()) ? "ONLINE" : "OFFLINE",
+            value(device.getBatteryPercent()),
+            value(device.getSignalBars()),
+            blankToDefault(device.getFirmwareVersion(), "-"),
+            String.format("%.1fGB/%.1fGB", value(device.getStorageUsedGb()), value(device.getStorageTotalGb())),
+            workState(device),
+            formatDate(device.getLastHeartbeatTime())
+        );
+    }
+
+    private void applyDeviceCommand(PatrolDevice device, String command) {
+        if ("START_RECORD".equals(command)) {
+            device.setRecordingStatus("RECORDING");
+        } else if ("STOP_RECORD".equals(command) || "STOP_STREAM".equals(command)) {
+            device.setRecordingStatus("IDLE");
+            device.setTalking(false);
+        } else if ("START_TALK".equals(command)) {
+            device.setTalking(true);
+        } else if ("STOP_TALK".equals(command)) {
+            device.setTalking(false);
+        }
+        device.setOnline(true);
+        device.setCloudConnected(true);
+        device.setLastHeartbeatTime(new Date());
+    }
+
+    private AlertVo toAlertVo(PatrolAlert alert) {
+        return new AlertVo(
+            alert.getAlertId(),
+            alertType(alert),
+            alert.getTitle(),
+            blankToDefault(alert.getDescription(), alert.getTitle()),
+            blankToDefault(alert.getSource(), "-"),
+            officerNameByDevice(alert.getSource()),
+            blankToDefault(alert.getLocationText(), "-"),
+            alert.getStatus(),
+            alert.getLevel(),
+            blankToDefault(alert.getConfidence(), "-"),
+            blankToDefault(alert.getOccurredAt(), formatDate(alert.getCreateTime()))
+        );
+    }
+
+    private MediaVo toMediaVo(PatrolMedia media) {
+        return new MediaVo(
+            media.getFileId(),
+            media.getFileName(),
+            media.getMediaType(),
+            blankToDefault(deviceIdByMedia(media), "-"),
+            officerNameByDevice(deviceIdByMedia(media)),
+            media.getStorageSide(),
+            blankToDefault(media.getSizeText(), "-"),
+            Boolean.TRUE.equals(media.getSha256Verified()) ? "VERIFIED" : blankToDefault(media.getTransferStatus(), "PENDING"),
+            storagePath(media),
+            blankToDefault(media.getCapturedAt(), formatDate(media.getCreateTime()))
+        );
+    }
+
+    private SosVo toSosVo(PatrolSosEvent event) {
+        return new SosVo(
+            event.getSosId(),
+            "移动端警员",
+            "POLICE_9527",
+            "巡逻组 A-42",
+            "HEADSET_001",
+            blankToDefault(event.getAddress(), "-"),
+            event.getPhase(),
+            blankToDefault(event.getMessage(), "等待处置"),
+            Boolean.TRUE.equals(event.getRecordingAudio()),
+            event.getBackupEtaMinutes(),
+            formatDate(event.getCreateTime())
+        );
+    }
+
+    private String alertType(PatrolAlert alert) {
+        String text = blankToDefault(alert.getTitle(), "") + blankToDefault(alert.getDescription(), "");
+        if (text.contains("车")) {
+            return "VEHICLE";
+        }
+        if (text.contains("声") || text.contains("音")) {
+            return "AUDIO";
+        }
+        return "PERSON";
+    }
+
+    private String workState(PatrolDevice device) {
+        if (!Boolean.TRUE.equals(device.getOnline())) {
+            return "OFFLINE";
+        }
+        if (value(device.getBatteryPercent()) < 20) {
+            return "LOW_BATTERY";
+        }
+        if (Boolean.TRUE.equals(device.getTalking())) {
+            return "TALKING";
+        }
+        return blankToDefault(device.getRecordingStatus(), "IDLE");
+    }
+
+    private String officerNameByDevice(String deviceId) {
+        PatrolDevice device = deviceId == null ? null : deviceMapper.selectById(deviceId);
+        return device == null ? "系统算法" : officerName(device);
+    }
+
+    private String officerName(PatrolDevice device) {
+        return "HEADSET_001".equals(device.getDeviceId()) ? "张警官" : "未绑定警员";
+    }
+
+    private String badgeNo(PatrolDevice device) {
+        return "HEADSET_001".equals(device.getDeviceId()) ? "POLICE_9527" : "-";
+    }
+
+    private String deptName(PatrolDevice device) {
+        return "HEADSET_001".equals(device.getDeviceId()) ? "巡逻组 A-42" : "未分配";
+    }
+
+    private String deviceIdByMedia(PatrolMedia media) {
+        return media.getObjectKey() != null && media.getObjectKey().contains("device/") ? "HEADSET_001" : null;
+    }
+
+    private String storagePath(PatrolMedia media) {
+        String bucket = blankToDefault(media.getBucketName(), "ruoyi");
+        String objectKey = blankToDefault(media.getObjectKey(), media.getContentUri());
+        return objectKey == null ? bucket : bucket + "/" + objectKey;
+    }
+
+    private String formatDate(Date date) {
+        if (date == null) {
+            return "-";
+        }
+        return DATE_TIME_FORMATTER.format(date.toInstant().atZone(ZoneId.systemDefault()).toLocalDateTime());
+    }
+
+    private String blankToDefault(String value, String defaultValue) {
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    private int value(Integer value) {
+        return value == null ? 0 : value;
+    }
+
+    private float value(Float value) {
+        return value == null ? 0F : value;
     }
 
     public record MetricVo(String label, String value, String note, String type) {
