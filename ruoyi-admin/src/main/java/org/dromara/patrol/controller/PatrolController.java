@@ -5,17 +5,25 @@ import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.patrol.domain.PatrolAlert;
+import org.dromara.patrol.domain.PatrolAlertAttachment;
 import org.dromara.patrol.domain.PatrolAuditLog;
+import org.dromara.patrol.domain.PatrolControlPerson;
+import org.dromara.patrol.domain.PatrolControlVehicle;
 import org.dromara.patrol.domain.PatrolDevice;
 import org.dromara.patrol.domain.PatrolDeviceCommand;
+import org.dromara.patrol.domain.PatrolDeviceEvent;
 import org.dromara.patrol.domain.PatrolLocationTrack;
 import org.dromara.patrol.domain.PatrolMedia;
 import org.dromara.patrol.domain.PatrolMessage;
 import org.dromara.patrol.domain.PatrolSosEvent;
+import org.dromara.patrol.mapper.PatrolAlertAttachmentMapper;
 import org.dromara.patrol.mapper.PatrolAlertMapper;
 import org.dromara.patrol.mapper.PatrolAuditLogMapper;
+import org.dromara.patrol.mapper.PatrolControlPersonMapper;
+import org.dromara.patrol.mapper.PatrolControlVehicleMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
 import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
+import org.dromara.patrol.mapper.PatrolDeviceEventMapper;
 import org.dromara.patrol.mapper.PatrolLocationTrackMapper;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
 import org.dromara.patrol.mapper.PatrolMessageMapper;
@@ -30,6 +38,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -51,15 +61,20 @@ import java.util.UUID;
 public class PatrolController {
 
     private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
     private final PatrolDeviceMapper deviceMapper;
     private final PatrolDeviceCommandMapper commandMapper;
+    private final PatrolDeviceEventMapper deviceEventMapper;
     private final PatrolLocationTrackMapper locationTrackMapper;
     private final PatrolAlertMapper alertMapper;
+    private final PatrolAlertAttachmentMapper alertAttachmentMapper;
     private final PatrolMediaMapper mediaMapper;
     private final PatrolSosEventMapper sosEventMapper;
     private final PatrolMessageMapper messageMapper;
     private final PatrolAuditLogMapper auditLogMapper;
+    private final PatrolControlPersonMapper controlPersonMapper;
+    private final PatrolControlVehicleMapper controlVehicleMapper;
 
     @GetMapping("/dashboard/summary")
     public R<DashboardSummaryVo> dashboard() {
@@ -110,6 +125,7 @@ public class PatrolController {
         record.setSentAt(now);
         record.setDelFlag("0");
         commandMapper.insert(record);
+        saveDeviceEvent(deviceId, "COMMAND", "INFO", "平台下发设备指令", command.command());
         logAudit("COMMAND", "下发设备指令：" + command.command(), deviceId, "SUCCESS");
         return R.ok(new CommandResultVo(commandId, deviceId, command.command(), "ACCEPTED", record.getResultMessage()));
     }
@@ -132,6 +148,27 @@ public class PatrolController {
             .stream()
             .limit(20)
             .map(this::toCommandLogVo)
+            .toList());
+    }
+
+    @GetMapping("/devices/events")
+    public R<List<DeviceEventVo>> deviceEvents() {
+        return R.ok(deviceEventMapper.selectList(new LambdaQueryWrapper<PatrolDeviceEvent>()
+                .orderByDesc(PatrolDeviceEvent::getOccurredAt))
+            .stream()
+            .limit(100)
+            .map(this::toDeviceEventVo)
+            .toList());
+    }
+
+    @GetMapping("/devices/{deviceId}/events")
+    public R<List<DeviceEventVo>> deviceEvents(@PathVariable String deviceId) {
+        return R.ok(deviceEventMapper.selectList(new LambdaQueryWrapper<PatrolDeviceEvent>()
+                .eq(PatrolDeviceEvent::getDeviceId, deviceId)
+                .orderByDesc(PatrolDeviceEvent::getOccurredAt))
+            .stream()
+            .limit(50)
+            .map(this::toDeviceEventVo)
             .toList());
     }
 
@@ -239,8 +276,19 @@ public class PatrolController {
             alert.setCloseNote(bo.note());
             alertMapper.updateById(alert);
         }
+        saveAlertAttachments(alertId, bo.attachments());
         logAudit("ALERT", "关闭预警：" + bo.result(), alertId, "SUCCESS");
         return R.ok(new AlertActionVo(alertId, "CLOSED", "处置结果已提交：" + bo.result()));
+    }
+
+    @GetMapping("/alerts/{alertId}/attachments")
+    public R<List<AlertAttachmentVo>> alertAttachments(@PathVariable String alertId) {
+        return R.ok(alertAttachmentMapper.selectList(new LambdaQueryWrapper<PatrolAlertAttachment>()
+                .eq(PatrolAlertAttachment::getAlertId, alertId)
+                .orderByDesc(PatrolAlertAttachment::getCreateTime))
+            .stream()
+            .map(this::toAlertAttachmentVo)
+            .toList());
     }
 
     @GetMapping("/media")
@@ -319,43 +367,86 @@ public class PatrolController {
 
     @GetMapping("/control/persons")
     public R<List<ControlPersonVo>> controlPersons() {
-        return R.ok(List.of(
-            new ControlPersonVo("CP-001", "李某某", "重点关注", "HIGH", "ENABLED", "第三方重点人员库", "2026-06-30"),
-            new ControlPersonVo("CP-002", "王某某", "临控人员", "MEDIUM", "ENABLED", "平台导入", "2026-05-31")
-        ));
+        return R.ok(controlPersonMapper.selectList(new LambdaQueryWrapper<PatrolControlPerson>()
+                .orderByDesc(PatrolControlPerson::getCreateTime))
+            .stream()
+            .map(this::toControlPersonVo)
+            .toList());
     }
 
     @PostMapping("/control/persons")
     public R<ControlPersonVo> createControlPerson(@RequestBody ControlPersonBo bo) {
-        return R.ok(new ControlPersonVo("CP-" + System.currentTimeMillis(), bo.name(), bo.category(), bo.riskLevel(), "ENABLED", "平台录入", bo.expiresAt()));
+        PatrolControlPerson person = new PatrolControlPerson();
+        person.setControlId("CP-" + UUID.randomUUID());
+        person.setTenantId(currentTenantId());
+        person.setName(bo.name());
+        person.setCategory(blankToDefault(bo.category(), "重点关注"));
+        person.setIdCardNo(bo.idCardNo());
+        person.setRiskLevel(blankToDefault(bo.riskLevel(), "MEDIUM"));
+        person.setStatus("ENABLED");
+        person.setSource("平台录入");
+        person.setExpiresAt(parseDate(bo.expiresAt()));
+        person.setRemark(bo.remark());
+        person.setDelFlag("0");
+        controlPersonMapper.insert(person);
+        logAudit("CONTROL", "新增人员布控", person.getControlId(), "SUCCESS");
+        return R.ok(toControlPersonVo(person));
     }
 
     @PostMapping("/control/persons/import")
     public R<ImportResultVo> importControlPersons() {
+        logAudit("CONTROL", "导入人员布控", "control-person-import", "SUCCESS");
         return R.ok(new ImportResultVo("IMPORT-" + System.currentTimeMillis(), 128, 126, 2, "人员布控导入任务已完成"));
     }
 
     @PatchMapping("/control/persons/{controlId}/status")
     public R<ControlStatusVo> updateControlPersonStatus(@PathVariable String controlId, @RequestBody StatusBo bo) {
-        return R.ok(new ControlStatusVo(controlId, bo.status(), "人员布控状态已更新"));
+        PatrolControlPerson person = controlPersonMapper.selectById(controlId);
+        if (person != null) {
+            person.setStatus(bo.status());
+            controlPersonMapper.updateById(person);
+        }
+        logAudit("CONTROL", "更新人员布控状态：" + bo.status(), controlId, person == null ? "FAILED" : "SUCCESS");
+        return R.ok(new ControlStatusVo(controlId, bo.status(), person == null ? "人员布控不存在" : "人员布控状态已更新"));
     }
 
     @GetMapping("/control/vehicles")
     public R<List<ControlVehicleVo>> controlVehicles() {
-        return R.ok(List.of(
-            new ControlVehicleVo("CV-001", "京A12345", "黑色 SUV", "HIGH", "ENABLED", "第三方重点车辆库", "2026-06-30"),
-            new ControlVehicleVo("CV-002", "京B67890", "白色轿车", "MEDIUM", "DISABLED", "平台录入", "2026-05-31")
-        ));
+        return R.ok(controlVehicleMapper.selectList(new LambdaQueryWrapper<PatrolControlVehicle>()
+                .orderByDesc(PatrolControlVehicle::getCreateTime))
+            .stream()
+            .map(this::toControlVehicleVo)
+            .toList());
     }
 
     @PostMapping("/control/vehicles")
     public R<ControlVehicleVo> createControlVehicle(@RequestBody ControlVehicleBo bo) {
-        return R.ok(new ControlVehicleVo("CV-" + System.currentTimeMillis(), bo.plateNo(), bo.vehicleDesc(), bo.riskLevel(), "ENABLED", "平台录入", bo.expiresAt()));
+        PatrolControlVehicle vehicle = new PatrolControlVehicle();
+        vehicle.setControlId("CV-" + UUID.randomUUID());
+        vehicle.setTenantId(currentTenantId());
+        vehicle.setPlateNo(bo.plateNo());
+        vehicle.setVehicleDesc(blankToDefault(bo.vehicleDesc(), "未填写"));
+        vehicle.setVehicleType(bo.vehicleType());
+        vehicle.setRiskLevel(blankToDefault(bo.riskLevel(), "MEDIUM"));
+        vehicle.setStatus("ENABLED");
+        vehicle.setSource("平台录入");
+        vehicle.setExpiresAt(parseDate(bo.expiresAt()));
+        vehicle.setRemark(bo.remark());
+        vehicle.setDelFlag("0");
+        controlVehicleMapper.insert(vehicle);
+        logAudit("CONTROL", "新增车辆布控", vehicle.getControlId(), "SUCCESS");
+        return R.ok(toControlVehicleVo(vehicle));
     }
 
     @PatchMapping("/control/vehicles/{controlId}/status")
     public R<ControlStatusVo> updateControlVehicleStatus(@PathVariable String controlId, @RequestBody StatusBo bo) {
-        return R.ok(new ControlStatusVo(controlId, bo.status(), "车辆布控状态已更新"));
+        PatrolControlVehicle vehicle = controlVehicleMapper.selectById(controlId);
+        if (vehicle != null) {
+            vehicle.setStatus(bo.status());
+            controlVehicleMapper.updateById(vehicle);
+        }
+        logAudit("CONTROL", "更新车辆布控状态：" + bo.status(), controlId, vehicle == null ? "FAILED" : "SUCCESS");
+        return R.ok(new ControlStatusVo(controlId, bo.status(), vehicle == null ? "车辆布控不存在" : "车辆布控状态已更新"));
     }
 
     @GetMapping("/statistics/overview")
@@ -613,6 +704,56 @@ public class PatrolController {
         );
     }
 
+    private DeviceEventVo toDeviceEventVo(PatrolDeviceEvent event) {
+        return new DeviceEventVo(
+            event.getEventId(),
+            event.getDeviceId(),
+            event.getEventType(),
+            event.getEventLevel(),
+            event.getEventTitle(),
+            blankToDefault(event.getEventDetail(), "-"),
+            formatDate(event.getOccurredAt())
+        );
+    }
+
+    private AlertAttachmentVo toAlertAttachmentVo(PatrolAlertAttachment attachment) {
+        return new AlertAttachmentVo(
+            attachment.getAttachmentId(),
+            attachment.getAlertId(),
+            attachment.getClientFileId(),
+            attachment.getFileName(),
+            attachment.getMimeType(),
+            attachment.getSizeBytes(),
+            attachment.getSource(),
+            attachment.getLocalUri(),
+            attachment.getUploadIntent()
+        );
+    }
+
+    private ControlPersonVo toControlPersonVo(PatrolControlPerson person) {
+        return new ControlPersonVo(
+            person.getControlId(),
+            person.getName(),
+            blankToDefault(person.getCategory(), "-"),
+            blankToDefault(person.getRiskLevel(), "-"),
+            blankToDefault(person.getStatus(), "-"),
+            blankToDefault(person.getSource(), "-"),
+            formatDate(person.getExpiresAt())
+        );
+    }
+
+    private ControlVehicleVo toControlVehicleVo(PatrolControlVehicle vehicle) {
+        return new ControlVehicleVo(
+            vehicle.getControlId(),
+            vehicle.getPlateNo(),
+            blankToDefault(vehicle.getVehicleDesc(), "-"),
+            blankToDefault(vehicle.getRiskLevel(), "-"),
+            blankToDefault(vehicle.getStatus(), "-"),
+            blankToDefault(vehicle.getSource(), "-"),
+            formatDate(vehicle.getExpiresAt())
+        );
+    }
+
     private MessageVo toMessageVo(PatrolMessage message) {
         return new MessageVo(
             message.getMessageId(),
@@ -658,6 +799,41 @@ public class PatrolController {
         auditLogMapper.insert(log);
     }
 
+    private void saveDeviceEvent(String deviceId, String eventType, String eventLevel, String eventTitle, String eventDetail) {
+        PatrolDeviceEvent event = new PatrolDeviceEvent();
+        event.setEventId("EVT-" + UUID.randomUUID());
+        event.setTenantId(currentTenantId());
+        event.setDeviceId(deviceId);
+        event.setEventType(eventType);
+        event.setEventLevel(eventLevel);
+        event.setEventTitle(eventTitle);
+        event.setEventDetail(eventDetail);
+        event.setOccurredAt(new Date());
+        event.setDelFlag("0");
+        deviceEventMapper.insert(event);
+    }
+
+    private void saveAlertAttachments(String alertId, List<AlertAttachmentBo> attachments) {
+        if (attachments == null || attachments.isEmpty()) {
+            return;
+        }
+        attachments.forEach(item -> {
+            PatrolAlertAttachment attachment = new PatrolAlertAttachment();
+            attachment.setAttachmentId("ATT-" + UUID.randomUUID());
+            attachment.setTenantId(currentTenantId());
+            attachment.setAlertId(alertId);
+            attachment.setClientFileId(item.clientFileId());
+            attachment.setFileName(item.fileName());
+            attachment.setMimeType(item.mimeType());
+            attachment.setSizeBytes(item.sizeBytes());
+            attachment.setSource(item.source());
+            attachment.setLocalUri(item.localUri());
+            attachment.setUploadIntent(item.uploadIntent());
+            attachment.setDelFlag("0");
+            alertAttachmentMapper.insert(attachment);
+        });
+    }
+
     private String targetName(String targetId, String targetType) {
         if ("DEVICE".equals(targetType)) {
             PatrolDevice device = targetId == null ? null : deviceMapper.selectById(targetId);
@@ -687,6 +863,20 @@ public class PatrolController {
             return "-";
         }
         return DATE_TIME_FORMATTER.format(date.toInstant().atZone(ZoneId.systemDefault()).toLocalDateTime());
+    }
+
+    private Date parseDate(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            LocalDateTime dateTime = value.trim().length() <= 10
+                ? LocalDate.parse(value.trim(), DATE_FORMATTER).atTime(23, 59, 59)
+                : LocalDateTime.parse(value.trim(), DATE_TIME_FORMATTER);
+            return Date.from(dateTime.atZone(ZoneId.systemDefault()).toInstant());
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private String blankToDefault(String value, String defaultValue) {
@@ -725,6 +915,9 @@ public class PatrolController {
     public record CommandLogVo(String commandId, String deviceId, String command, String operatorId, String status, String resultMessage, String sentAt, String ackAt) {
     }
 
+    public record DeviceEventVo(String eventId, String deviceId, String eventType, String eventLevel, String eventTitle, String eventDetail, String occurredAt) {
+    }
+
     public record DispatchChannelVo(String channelId, String deviceId, String officerName, String deptName, String state, String mode, Integer latencyMs, String locationText, Boolean talking) {
     }
 
@@ -749,7 +942,13 @@ public class PatrolController {
     public record AlertVo(String alertId, String alertType, String title, String targetName, String deviceId, String officerName, String locationText, String status, String level, String confidence, String occurredAt) {
     }
 
-    public record AlertCloseBo(String result, String note) {
+    public record AlertCloseBo(String result, String note, List<AlertAttachmentBo> attachments) {
+    }
+
+    public record AlertAttachmentBo(String clientFileId, String fileName, String mimeType, Long sizeBytes, String source, String localUri, String uploadIntent) {
+    }
+
+    public record AlertAttachmentVo(String attachmentId, String alertId, String clientFileId, String fileName, String mimeType, Long sizeBytes, String source, String localUri, String uploadIntent) {
     }
 
     public record AlertActionVo(String alertId, String nextStatus, String message) {
@@ -782,10 +981,10 @@ public class PatrolController {
     public record ControlVehicleVo(String controlId, String plateNo, String vehicleDesc, String riskLevel, String status, String source, String expiresAt) {
     }
 
-    public record ControlPersonBo(String name, String category, String riskLevel, String expiresAt) {
+    public record ControlPersonBo(String name, String category, String idCardNo, String riskLevel, String expiresAt, String remark) {
     }
 
-    public record ControlVehicleBo(String plateNo, String vehicleDesc, String riskLevel, String expiresAt) {
+    public record ControlVehicleBo(String plateNo, String vehicleDesc, String vehicleType, String riskLevel, String expiresAt, String remark) {
     }
 
     public record StatusBo(String status) {

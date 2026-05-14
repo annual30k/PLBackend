@@ -15,10 +15,12 @@ import org.dromara.common.redis.utils.RedisUtils;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.patrol.domain.PatrolAlert;
+import org.dromara.patrol.domain.PatrolAlertAttachment;
 import org.dromara.patrol.domain.PatrolArea;
 import org.dromara.patrol.domain.PatrolAuditLog;
 import org.dromara.patrol.domain.PatrolDevice;
 import org.dromara.patrol.domain.PatrolDeviceCommand;
+import org.dromara.patrol.domain.PatrolDeviceEvent;
 import org.dromara.patrol.domain.PatrolLocationTrack;
 import org.dromara.patrol.domain.PatrolMedia;
 import org.dromara.patrol.domain.PatrolMessage;
@@ -42,12 +44,15 @@ import org.dromara.patrol.entity.SosEventDto;
 import org.dromara.patrol.entity.StreamRelayRequestDto;
 import org.dromara.patrol.entity.StreamRelayStateDto;
 import org.dromara.patrol.entity.TransferRequestDto;
+import org.dromara.patrol.entity.UploadAttachmentDto;
 import org.dromara.patrol.entity.UserProfileDto;
+import org.dromara.patrol.mapper.PatrolAlertAttachmentMapper;
 import org.dromara.patrol.mapper.PatrolAlertMapper;
 import org.dromara.patrol.mapper.PatrolAreaMapper;
 import org.dromara.patrol.mapper.PatrolAuditLogMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
 import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
+import org.dromara.patrol.mapper.PatrolDeviceEventMapper;
 import org.dromara.patrol.mapper.PatrolLocationTrackMapper;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
 import org.dromara.patrol.mapper.PatrolMessageMapper;
@@ -85,8 +90,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private final ISysDeptService deptService;
     private final PatrolDeviceMapper deviceMapper;
     private final PatrolDeviceCommandMapper commandMapper;
+    private final PatrolDeviceEventMapper deviceEventMapper;
     private final PatrolLocationTrackMapper locationTrackMapper;
     private final PatrolAlertMapper alertMapper;
+    private final PatrolAlertAttachmentMapper alertAttachmentMapper;
     private final PatrolMediaMapper mediaMapper;
     private final PatrolMessageMapper messageMapper;
     private final PatrolAuditLogMapper auditLogMapper;
@@ -157,6 +164,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             device.setTalking(false);
             device.setLastHeartbeatTime(new Date());
             deviceMapper.insertOrUpdate(device);
+            saveDeviceEvent(deviceId, "BIND", "INFO", "设备绑定上线", device.getDeviceName() + " 已绑定并同步云端连接状态");
             cacheDevice(device);
             return toDeviceStatus(device);
         });
@@ -180,6 +188,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             device.setCloudConnected(true);
             deviceMapper.insertOrUpdate(device);
             saveCommand(deviceId, request, "ACKED", "安卓端指令已同步到平台状态");
+            saveDeviceEvent(deviceId, "COMMAND", "INFO", "App同步设备指令", request.getCommand());
             cacheDevice(device);
             return toDeviceStatus(device);
         });
@@ -199,7 +208,12 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public AlertDto closeAlert(String alertId, AlertCloseRequestDto request) {
-        return TenantHelper.dynamic(TENANT_ID, () -> updateAlert(alertId, "CLOSED", request.getResult() + "：" + request.getNote(), request.getResult(), request.getOperatorId()));
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            AlertDto alert = updateAlert(alertId, "CLOSED", request.getResult() + "：" + request.getNote(), request.getResult(), request.getOperatorId());
+            saveAlertAttachments(alertId, request.getAttachments());
+            saveAudit("ALERT", "App关闭预警", alertId, "SUCCESS");
+            return alert;
+        });
     }
 
     @Override
@@ -267,6 +281,11 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 saveLocationTrack(device, request);
             }
             deviceMapper.insertOrUpdate(device);
+            if (!request.isOnline()) {
+                saveDeviceEvent(device.getDeviceId(), "OFFLINE", "WARNING", "设备离线", "心跳上报 offline");
+            } else if (request.getBatteryPercent() < 20) {
+                saveDeviceEvent(device.getDeviceId(), "LOW_BATTERY", "WARNING", "设备低电量", "当前电量 " + request.getBatteryPercent() + "%");
+            }
             cacheDevice(device);
         });
         return new HeartbeatAckDto(request.isOnline(), Instant.now().getEpochSecond(), 15);
@@ -523,6 +542,41 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         command.setAckAt(new Date());
         command.setDelFlag("0");
         commandMapper.insert(command);
+    }
+
+    private void saveDeviceEvent(String deviceId, String eventType, String eventLevel, String eventTitle, String eventDetail) {
+        PatrolDeviceEvent event = new PatrolDeviceEvent();
+        event.setTenantId(TENANT_ID);
+        event.setEventId("EVT-" + UUID.randomUUID());
+        event.setDeviceId(deviceId);
+        event.setEventType(eventType);
+        event.setEventLevel(eventLevel);
+        event.setEventTitle(eventTitle);
+        event.setEventDetail(eventDetail);
+        event.setOccurredAt(new Date());
+        event.setDelFlag("0");
+        deviceEventMapper.insert(event);
+    }
+
+    private void saveAlertAttachments(String alertId, List<UploadAttachmentDto> attachments) {
+        if (attachments == null || attachments.isEmpty()) {
+            return;
+        }
+        attachments.forEach(item -> {
+            PatrolAlertAttachment attachment = new PatrolAlertAttachment();
+            attachment.setTenantId(TENANT_ID);
+            attachment.setAttachmentId("ATT-" + UUID.randomUUID());
+            attachment.setAlertId(alertId);
+            attachment.setClientFileId(item.getClientFileId());
+            attachment.setFileName(item.getFileName());
+            attachment.setMimeType(item.getMimeType());
+            attachment.setSizeBytes(item.getSizeBytes());
+            attachment.setSource(item.getSource());
+            attachment.setLocalUri(item.getLocalUri());
+            attachment.setUploadIntent(item.getUploadIntent());
+            attachment.setDelFlag("0");
+            alertAttachmentMapper.insert(attachment);
+        });
     }
 
     private void saveLocationTrack(PatrolDevice device, HeartbeatRequestDto request) {

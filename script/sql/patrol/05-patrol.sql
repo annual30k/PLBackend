@@ -54,6 +54,27 @@ create table if not exists patrol_alert (
     key idx_patrol_alert_tenant_status (tenant_id, status)
 ) engine=innodb default charset=utf8mb4 comment='巡检告警表';
 
+create table if not exists patrol_alert_attachment (
+    attachment_id  varchar(64)  not null comment '附件ID',
+    tenant_id      varchar(20)  default '000000' comment '租户编号',
+    alert_id       varchar(64)  not null comment '告警ID',
+    client_file_id varchar(64)  default null comment '客户端文件ID',
+    file_name      varchar(255) default null comment '文件名',
+    mime_type      varchar(100) default null comment 'MIME类型',
+    size_bytes     bigint(20)   default null comment '文件大小',
+    source         varchar(32)  default null comment '文件来源',
+    local_uri      varchar(500) default null comment '端侧本地URI',
+    upload_intent  varchar(64)  default null comment '上传用途',
+    create_dept    bigint(20)   default null comment '创建部门',
+    create_by      bigint(20)   default null comment '创建者',
+    create_time    datetime     default null comment '创建时间',
+    update_by      bigint(20)   default null comment '更新者',
+    update_time    datetime     default null comment '更新时间',
+    del_flag       char(1)      default '0' comment '删除标志',
+    primary key (attachment_id),
+    key idx_patrol_alert_attachment_alert (tenant_id, alert_id)
+) engine=innodb default charset=utf8mb4 comment='预警处置附件表';
+
 create table if not exists patrol_media (
     media_id          bigint(20)    not null comment '媒体主键',
     tenant_id         varchar(20)   default '000000' comment '租户编号',
@@ -165,6 +186,26 @@ create table if not exists patrol_device_command (
     key idx_patrol_command_status (tenant_id, status)
 ) engine=innodb default charset=utf8mb4 comment='设备指令记录表';
 
+create table if not exists patrol_device_event (
+    event_id     varchar(64)   not null comment '事件ID',
+    tenant_id    varchar(20)   default '000000' comment '租户编号',
+    device_id    varchar(64)   not null comment '设备ID',
+    event_type   varchar(64)   not null comment '事件类型',
+    event_level  varchar(32)   not null comment '事件级别',
+    event_title  varchar(120)  not null comment '事件标题',
+    event_detail varchar(1000) default null comment '事件详情',
+    occurred_at  datetime      default null comment '发生时间',
+    create_dept  bigint(20)    default null comment '创建部门',
+    create_by    bigint(20)    default null comment '创建者',
+    create_time  datetime      default null comment '创建时间',
+    update_by    bigint(20)    default null comment '更新者',
+    update_time  datetime      default null comment '更新时间',
+    del_flag     char(1)       default '0' comment '删除标志',
+    primary key (event_id),
+    key idx_patrol_device_event_device_time (tenant_id, device_id, occurred_at),
+    key idx_patrol_device_event_type (tenant_id, event_type)
+) engine=innodb default charset=utf8mb4 comment='设备事件日志表';
+
 create table if not exists patrol_message (
     message_id  varchar(64)   not null comment '消息ID',
     tenant_id   varchar(20)   default '000000' comment '租户编号',
@@ -211,6 +252,50 @@ create table if not exists patrol_audit_log (
     key idx_patrol_audit_resource (tenant_id, resource)
 ) engine=innodb default charset=utf8mb4 comment='指挥后台审计日志表';
 
+create table if not exists patrol_control_person (
+    control_id  varchar(64)  not null comment '布控ID',
+    tenant_id   varchar(20)  default '000000' comment '租户编号',
+    name        varchar(64)  not null comment '姓名',
+    category    varchar(64)  default null comment '布控类别',
+    id_card_no  varchar(64)  default null comment '身份证号',
+    risk_level  varchar(32)  not null comment '风险等级',
+    status      varchar(32)  not null comment '布控状态',
+    source      varchar(120) default null comment '数据来源',
+    expires_at  datetime     default null comment '到期时间',
+    remark      varchar(500) default null comment '备注',
+    create_dept bigint(20)   default null comment '创建部门',
+    create_by   bigint(20)   default null comment '创建者',
+    create_time datetime     default null comment '创建时间',
+    update_by   bigint(20)   default null comment '更新者',
+    update_time datetime     default null comment '更新时间',
+    del_flag    char(1)      default '0' comment '删除标志',
+    primary key (control_id),
+    key idx_patrol_control_person_status (tenant_id, status),
+    key idx_patrol_control_person_name (tenant_id, name)
+) engine=innodb default charset=utf8mb4 comment='人员布控表';
+
+create table if not exists patrol_control_vehicle (
+    control_id   varchar(64)  not null comment '布控ID',
+    tenant_id    varchar(20)  default '000000' comment '租户编号',
+    plate_no     varchar(32)  not null comment '车牌号',
+    vehicle_desc varchar(120) default null comment '车辆描述',
+    vehicle_type varchar(32)  default null comment '车辆类型',
+    risk_level   varchar(32)  not null comment '风险等级',
+    status       varchar(32)  not null comment '布控状态',
+    source       varchar(120) default null comment '数据来源',
+    expires_at   datetime     default null comment '到期时间',
+    remark       varchar(500) default null comment '备注',
+    create_dept  bigint(20)   default null comment '创建部门',
+    create_by    bigint(20)   default null comment '创建者',
+    create_time  datetime     default null comment '创建时间',
+    update_by    bigint(20)   default null comment '更新者',
+    update_time  datetime     default null comment '更新时间',
+    del_flag     char(1)      default '0' comment '删除标志',
+    primary key (control_id),
+    key idx_patrol_control_vehicle_status (tenant_id, status),
+    key idx_patrol_control_vehicle_plate (tenant_id, plate_no)
+) engine=innodb default charset=utf8mb4 comment='车辆布控表';
+
 insert ignore into sys_user values(9527, '000000', 103, 'POLICE_9527', '张警官', 'sys_user', 'zhang.police@city.gov.cn', '13800009527', '0', null, '$2a$10$X7Dwu6JiORKduaP8iS9sOOgUk/w93X63gAg2XAGGAXRs0KbiaNSki', '0', '0', '127.0.0.1', sysdate(), 103, 1, sysdate(), null, null, '移动端巡逻警员');
 insert ignore into sys_user_role values ('9527', '3');
 insert ignore into sys_user_post values ('9527', '4');
@@ -227,6 +312,10 @@ values
 ('AL-99824-03', '000000', '非法侵入监测', 'CRITICAL', 'PENDING', '14:32', '西三区 4号围墙 节点B', 'CAM-042', '围墙节点 B 检测到人员越界，耳机端已同步 12 秒现场视频片段。', '98.4%', 103, 1, sysdate(), '0'),
 ('AL-99824-04', '000000', '未识别车辆靠近', 'WARNING', 'PENDING', '14:38', '北侧周界入口', 'RFID-09', '车牌识别失败，建议现场复核并记录车辆去向。', '91.2%', 103, 1, sysdate(), '0'),
 ('AL-99821-11', '000000', '夜间巡查异常声源', 'INFO', 'CLOSED', '13:22', '核心商务区 CBD-North', 'HEADSET_001', '环境音频超过阈值，现场确认无风险。', '74.8%', 103, 1, sysdate(), '0');
+
+insert ignore into patrol_alert_attachment(attachment_id, tenant_id, alert_id, client_file_id, file_name, mime_type, size_bytes, source, local_uri, upload_intent, create_dept, create_by, create_time, del_flag)
+values
+('ATT-SEED-001', '000000', 'AL-99821-11', 'AUD-318', '现场确认录音.m4a', 'audio/mp4', 9017753, 'AUDIO', 'device://AUD-318', 'ALERT_CLOSE', 103, 1, sysdate(), '0');
 
 insert ignore into patrol_media(media_id, tenant_id, file_id, file_name, media_type, captured_at, size_text, duration_text, sha256_verified, storage_side, transfer_status, progress, bucket_name, object_key, create_dept, create_by, create_time, del_flag)
 values
@@ -252,11 +341,27 @@ values
 ('CMD-SEED-001', '000000', 'HEADSET_001', 'START_RECORD', 'admin', 'seed-001', 'ACKED', '端侧已进入录制状态', date_sub(sysdate(), interval 18 minute), date_sub(sysdate(), interval 17 minute), 103, 1, sysdate(), '0'),
 ('CMD-SEED-002', '000000', 'HEADSET_001', 'TAKE_PHOTO', 'admin', 'seed-002', 'ACCEPTED', '指令已写入，等待端侧回执', date_sub(sysdate(), interval 5 minute), null, 103, 1, sysdate(), '0');
 
+insert ignore into patrol_device_event(event_id, tenant_id, device_id, event_type, event_level, event_title, event_detail, occurred_at, create_dept, create_by, create_time, del_flag)
+values
+('EVT-SEED-001', '000000', 'HEADSET_001', 'BIND', 'INFO', '设备绑定上线', 'HEADSET_001 已完成绑定并保持云端连接', date_sub(sysdate(), interval 22 minute), 103, 1, sysdate(), '0'),
+('EVT-SEED-002', '000000', 'HEADSET_001', 'COMMAND', 'INFO', '平台下发设备指令', 'START_RECORD', date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
+('EVT-SEED-003', '000000', 'HEADSET_001', 'COMMAND', 'INFO', '平台下发设备指令', 'TAKE_PHOTO', date_sub(sysdate(), interval 5 minute), 103, 1, sysdate(), '0');
+
 insert ignore into patrol_message(message_id, tenant_id, title, content, target_type, target_id, target_name, channel, status, read_count, total_count, sent_at, create_dept, create_by, create_time, del_flag)
 values
 ('MSG-001', '000000', '现场支援', '请前往温泉公园北侧入口支援未识别车辆复核。', 'SINGLE', 'POLICE_9527', '张警官', 'APP', 'READ', 1, 1, date_sub(sysdate(), interval 30 minute), 103, 1, sysdate(), '0'),
 ('MSG-002', '000000', '重点预警升级', '重点人员预警升级，注意联动盘查并上传现场照片。', 'ORG', 'TEAM-A-42', '巡逻组 A-42', 'APP', 'SENT', 0, 4, date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
 ('MSG-003', '000000', '设备电量提醒', '设备低电量，请更换备用设备并保持心跳在线。', 'DEVICE', 'HEADSET_001', 'ForceLink-H1', 'APP', 'SENT', 0, 1, date_sub(sysdate(), interval 9 minute), 103, 1, sysdate(), '0');
+
+insert ignore into patrol_control_person(control_id, tenant_id, name, category, id_card_no, risk_level, status, source, expires_at, remark, create_dept, create_by, create_time, del_flag)
+values
+('CP-001', '000000', '李某某', '重点关注', null, 'HIGH', 'ENABLED', '第三方重点人员库', '2026-06-30 23:59:59', '人脸比对命中后转预警', 103, 1, sysdate(), '0'),
+('CP-002', '000000', '王某某', '临控人员', null, 'MEDIUM', 'ENABLED', '平台导入', '2026-05-31 23:59:59', '巡区临时布控', 103, 1, sysdate(), '0');
+
+insert ignore into patrol_control_vehicle(control_id, tenant_id, plate_no, vehicle_desc, vehicle_type, risk_level, status, source, expires_at, remark, create_dept, create_by, create_time, del_flag)
+values
+('CV-001', '000000', '京A12345', '黑色 SUV', 'SUV', 'HIGH', 'ENABLED', '第三方重点车辆库', '2026-06-30 23:59:59', '车牌 OCR 命中后转预警', 103, 1, sysdate(), '0'),
+('CV-002', '000000', '京B67890', '白色轿车', 'SEDAN', 'MEDIUM', 'DISABLED', '平台录入', '2026-05-31 23:59:59', '人工登记车辆', 103, 1, sysdate(), '0');
 
 insert ignore into patrol_audit_log(log_id, tenant_id, log_type, operator_name, action, resource, result, ip_address, trace_id, occurred_at, create_dept, create_by, create_time, del_flag)
 values
