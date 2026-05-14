@@ -121,6 +121,96 @@ create table if not exists patrol_sos_event (
     key idx_patrol_sos_tenant_phase (tenant_id, phase)
 ) engine=innodb default charset=utf8mb4 comment='SOS事件表';
 
+create table if not exists patrol_location_track (
+    track_id        varchar(64)   not null comment '轨迹ID',
+    tenant_id       varchar(20)   default '000000' comment '租户编号',
+    badge_no        varchar(64)   default null comment '警号',
+    officer_name    varchar(64)   default null comment '警员姓名',
+    device_id       varchar(64)   not null comment '设备ID',
+    latitude        decimal(10,7) not null comment '纬度',
+    longitude       decimal(10,7) not null comment '经度',
+    accuracy_meters decimal(10,2) default null comment '定位精度',
+    address         varchar(255)  default null comment '地址',
+    reported_at     datetime      default null comment '上报时间',
+    create_dept     bigint(20)    default null comment '创建部门',
+    create_by       bigint(20)    default null comment '创建者',
+    create_time     datetime      default null comment '创建时间',
+    update_by       bigint(20)    default null comment '更新者',
+    update_time     datetime      default null comment '更新时间',
+    del_flag        char(1)       default '0' comment '删除标志',
+    primary key (track_id),
+    key idx_patrol_track_badge_time (tenant_id, badge_no, reported_at),
+    key idx_patrol_track_device_time (tenant_id, device_id, reported_at)
+) engine=innodb default charset=utf8mb4 comment='警力位置轨迹表';
+
+create table if not exists patrol_device_command (
+    command_id     varchar(64)   not null comment '指令ID',
+    tenant_id      varchar(20)   default '000000' comment '租户编号',
+    device_id      varchar(64)   not null comment '设备ID',
+    command        varchar(64)   not null comment '指令',
+    operator_id    varchar(64)   default null comment '操作人',
+    request_id     varchar(128)  default null comment '请求ID',
+    status         varchar(32)   not null comment '状态',
+    result_message varchar(500)  default null comment '结果消息',
+    sent_at        datetime      default null comment '下发时间',
+    ack_at         datetime      default null comment '回执时间',
+    create_dept    bigint(20)    default null comment '创建部门',
+    create_by      bigint(20)    default null comment '创建者',
+    create_time    datetime      default null comment '创建时间',
+    update_by      bigint(20)    default null comment '更新者',
+    update_time    datetime      default null comment '更新时间',
+    del_flag       char(1)       default '0' comment '删除标志',
+    primary key (command_id),
+    key idx_patrol_command_device_time (tenant_id, device_id, sent_at),
+    key idx_patrol_command_status (tenant_id, status)
+) engine=innodb default charset=utf8mb4 comment='设备指令记录表';
+
+create table if not exists patrol_message (
+    message_id  varchar(64)   not null comment '消息ID',
+    tenant_id   varchar(20)   default '000000' comment '租户编号',
+    title       varchar(120)  not null comment '标题',
+    content     varchar(1000) not null comment '内容',
+    target_type varchar(32)   not null comment '目标类型',
+    target_id   varchar(64)   not null comment '目标ID',
+    target_name varchar(120)  default null comment '目标名称',
+    channel     varchar(32)   default 'APP' comment '通道',
+    status      varchar(32)   not null comment '状态',
+    read_count  int           default 0 comment '已读数',
+    total_count int           default 1 comment '总数',
+    sent_at     datetime      default null comment '发送时间',
+    create_dept bigint(20)    default null comment '创建部门',
+    create_by   bigint(20)    default null comment '创建者',
+    create_time datetime      default null comment '创建时间',
+    update_by   bigint(20)    default null comment '更新者',
+    update_time datetime      default null comment '更新时间',
+    del_flag    char(1)       default '0' comment '删除标志',
+    primary key (message_id),
+    key idx_patrol_message_target (tenant_id, target_type, target_id),
+    key idx_patrol_message_time (tenant_id, sent_at)
+) engine=innodb default charset=utf8mb4 comment='指挥消息表';
+
+create table if not exists patrol_audit_log (
+    log_id        varchar(64)  not null comment '日志ID',
+    tenant_id     varchar(20)  default '000000' comment '租户编号',
+    log_type      varchar(32)  not null comment '日志类型',
+    operator_name varchar(64)  default null comment '操作人',
+    action        varchar(120) not null comment '动作',
+    resource      varchar(128) default null comment '资源',
+    result        varchar(32)  not null comment '结果',
+    ip_address    varchar(64)  default null comment 'IP',
+    trace_id      varchar(128) default null comment '链路ID',
+    occurred_at   datetime     default null comment '发生时间',
+    create_dept   bigint(20)   default null comment '创建部门',
+    create_by     bigint(20)   default null comment '创建者',
+    create_time   datetime     default null comment '创建时间',
+    update_by     bigint(20)   default null comment '更新者',
+    update_time   datetime     default null comment '更新时间',
+    del_flag      char(1)      default '0' comment '删除标志',
+    primary key (log_id),
+    key idx_patrol_audit_time (tenant_id, occurred_at),
+    key idx_patrol_audit_resource (tenant_id, resource)
+) engine=innodb default charset=utf8mb4 comment='指挥后台审计日志表';
+
 insert ignore into sys_user values(9527, '000000', 103, 'POLICE_9527', '张警官', 'sys_user', 'zhang.police@city.gov.cn', '13800009527', '0', null, '$2a$10$X7Dwu6JiORKduaP8iS9sOOgUk/w93X63gAg2XAGGAXRs0KbiaNSki', '0', '0', '127.0.0.1', sysdate(), 103, 1, sysdate(), null, null, '移动端巡逻警员');
 insert ignore into sys_user_role values ('9527', '3');
 insert ignore into sys_user_post values ('9527', '4');
@@ -150,3 +240,26 @@ values ('AREA-FZ-WQ-001', '000000', '福州温泉公园重点巡区', 'TEAM-A-42
 '[{"latitude":26.10295,"longitude":119.30485},{"latitude":26.10335,"longitude":119.31010},{"latitude":26.10020,"longitude":119.31115},{"latitude":26.09795,"longitude":119.30910},{"latitude":26.09815,"longitude":119.30465}]',
 '[{"latitude":26.09875,"longitude":119.30495},{"latitude":26.10020,"longitude":119.30655},{"latitude":26.10058,"longitude":119.30771},{"latitude":26.10155,"longitude":119.30900},{"latitude":26.10255,"longitude":119.30795}]',
 103, 1, sysdate(), '0');
+
+insert ignore into patrol_location_track(track_id, tenant_id, badge_no, officer_name, device_id, latitude, longitude, accuracy_meters, address, reported_at, create_dept, create_by, create_time, del_flag)
+values
+('TRK-SEED-001', '000000', 'POLICE_9527', '张警官', 'HEADSET_001', 26.0987500, 119.3049500, 8.5, '福州温泉公园巡区入口', date_sub(sysdate(), interval 24 minute), 103, 1, sysdate(), '0'),
+('TRK-SEED-002', '000000', 'POLICE_9527', '张警官', 'HEADSET_001', 26.1002000, 119.3065500, 7.2, '福州温泉公园', date_sub(sysdate(), interval 16 minute), 103, 1, sysdate(), '0'),
+('TRK-SEED-003', '000000', 'POLICE_9527', '张警官', 'HEADSET_001', 26.1005800, 119.3077100, 6.9, '福州温泉公园东门', date_sub(sysdate(), interval 8 minute), 103, 1, sysdate(), '0');
+
+insert ignore into patrol_device_command(command_id, tenant_id, device_id, command, operator_id, request_id, status, result_message, sent_at, ack_at, create_dept, create_by, create_time, del_flag)
+values
+('CMD-SEED-001', '000000', 'HEADSET_001', 'START_RECORD', 'admin', 'seed-001', 'ACKED', '端侧已进入录制状态', date_sub(sysdate(), interval 18 minute), date_sub(sysdate(), interval 17 minute), 103, 1, sysdate(), '0'),
+('CMD-SEED-002', '000000', 'HEADSET_001', 'TAKE_PHOTO', 'admin', 'seed-002', 'ACCEPTED', '指令已写入，等待端侧回执', date_sub(sysdate(), interval 5 minute), null, 103, 1, sysdate(), '0');
+
+insert ignore into patrol_message(message_id, tenant_id, title, content, target_type, target_id, target_name, channel, status, read_count, total_count, sent_at, create_dept, create_by, create_time, del_flag)
+values
+('MSG-001', '000000', '现场支援', '请前往温泉公园北侧入口支援未识别车辆复核。', 'SINGLE', 'POLICE_9527', '张警官', 'APP', 'READ', 1, 1, date_sub(sysdate(), interval 30 minute), 103, 1, sysdate(), '0'),
+('MSG-002', '000000', '重点预警升级', '重点人员预警升级，注意联动盘查并上传现场照片。', 'ORG', 'TEAM-A-42', '巡逻组 A-42', 'APP', 'SENT', 0, 4, date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
+('MSG-003', '000000', '设备电量提醒', '设备低电量，请更换备用设备并保持心跳在线。', 'DEVICE', 'HEADSET_001', 'ForceLink-H1', 'APP', 'SENT', 0, 1, date_sub(sysdate(), interval 9 minute), 103, 1, sysdate(), '0');
+
+insert ignore into patrol_audit_log(log_id, tenant_id, log_type, operator_name, action, resource, result, ip_address, trace_id, occurred_at, create_dept, create_by, create_time, del_flag)
+values
+('AUD-001', '000000', 'COMMAND', 'admin', '下发录制指令', 'HEADSET_001', 'SUCCESS', '127.0.0.1', 'seed-command-001', date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
+('AUD-002', '000000', 'ALERT', 'admin', '确认预警', 'AL-99824-04', 'SUCCESS', '127.0.0.1', 'seed-alert-001', date_sub(sysdate(), interval 12 minute), 103, 1, sysdate(), '0'),
+('AUD-003', '000000', 'MESSAGE', 'admin', '发送指挥消息', 'MSG-002', 'SUCCESS', '127.0.0.1', 'seed-message-001', date_sub(sysdate(), interval 9 minute), 103, 1, sysdate(), '0');

@@ -16,8 +16,12 @@ import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.patrol.domain.PatrolAlert;
 import org.dromara.patrol.domain.PatrolArea;
+import org.dromara.patrol.domain.PatrolAuditLog;
 import org.dromara.patrol.domain.PatrolDevice;
+import org.dromara.patrol.domain.PatrolDeviceCommand;
+import org.dromara.patrol.domain.PatrolLocationTrack;
 import org.dromara.patrol.domain.PatrolMedia;
+import org.dromara.patrol.domain.PatrolMessage;
 import org.dromara.patrol.domain.PatrolSosEvent;
 import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
@@ -32,6 +36,7 @@ import org.dromara.patrol.entity.MediaFileDto;
 import org.dromara.patrol.entity.PageEnvelope;
 import org.dromara.patrol.entity.PatrolAreaDto;
 import org.dromara.patrol.entity.PatrolGeoPointDto;
+import org.dromara.patrol.entity.PatrolMessageDto;
 import org.dromara.patrol.entity.ScannedDeviceDto;
 import org.dromara.patrol.entity.SosEventDto;
 import org.dromara.patrol.entity.StreamRelayRequestDto;
@@ -40,8 +45,12 @@ import org.dromara.patrol.entity.TransferRequestDto;
 import org.dromara.patrol.entity.UserProfileDto;
 import org.dromara.patrol.mapper.PatrolAlertMapper;
 import org.dromara.patrol.mapper.PatrolAreaMapper;
+import org.dromara.patrol.mapper.PatrolAuditLogMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
+import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
+import org.dromara.patrol.mapper.PatrolLocationTrackMapper;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
+import org.dromara.patrol.mapper.PatrolMessageMapper;
 import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.dromara.patrol.service.IPatrolAppService;
 import org.dromara.system.domain.SysUser;
@@ -58,6 +67,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 巡检App服务实现
@@ -70,13 +80,16 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private static final String APP_CLIENT_ID = "428a8310cd442757ae699df5d894f051";
     private static final String APP_CLIENT_KEY = "app";
     private static final String DEVICE_ID = "HEADSET_001";
-    private static final long MOCK_TIME = 1715832000L;
 
     private final SysUserMapper userMapper;
     private final ISysDeptService deptService;
     private final PatrolDeviceMapper deviceMapper;
+    private final PatrolDeviceCommandMapper commandMapper;
+    private final PatrolLocationTrackMapper locationTrackMapper;
     private final PatrolAlertMapper alertMapper;
     private final PatrolMediaMapper mediaMapper;
+    private final PatrolMessageMapper messageMapper;
+    private final PatrolAuditLogMapper auditLogMapper;
     private final PatrolAreaMapper areaMapper;
     private final PatrolSosEventMapper sosEventMapper;
 
@@ -166,6 +179,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             device.setOnline(true);
             device.setCloudConnected(true);
             deviceMapper.insertOrUpdate(device);
+            saveCommand(deviceId, request, "ACKED", "安卓端指令已同步到平台状态");
             cacheDevice(device);
             return toDeviceStatus(device);
         });
@@ -212,9 +226,13 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean deleteMedia(String fileId, String side) {
-        return TenantHelper.dynamic(TENANT_ID, () -> mediaMapper.delete(new LambdaQueryWrapper<PatrolMedia>()
-            .eq(PatrolMedia::getFileId, fileId)
-            .eq(side != null && !side.isBlank(), PatrolMedia::getStorageSide, side)) > 0);
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            boolean deleted = mediaMapper.delete(new LambdaQueryWrapper<PatrolMedia>()
+                .eq(PatrolMedia::getFileId, fileId)
+                .eq(side != null && !side.isBlank(), PatrolMedia::getStorageSide, side)) > 0;
+            saveAudit("MEDIA", "App删除媒体文件", fileId, deleted ? "SUCCESS" : "FAILED");
+            return deleted;
+        });
     }
 
     @Override
@@ -226,6 +244,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 file.setSha256Verified(true);
                 mediaMapper.updateById(file);
             });
+            saveAudit("MEDIA", "App校验媒体文件", fileId, files.isEmpty() ? "FAILED" : "SUCCESS");
             return !files.isEmpty();
         });
     }
@@ -241,10 +260,50 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             device.setRecordingStatus(request.getRecordingStatus());
             device.setCloudConnected(true);
             device.setLastHeartbeatTime(new Date());
+            if (request.getLatitude() != null && request.getLongitude() != null) {
+                device.setLatitude(request.getLatitude());
+                device.setLongitude(request.getLongitude());
+                device.setAddress(blankToDefault(request.getAddress(), device.getAddress()));
+                saveLocationTrack(device, request);
+            }
             deviceMapper.insertOrUpdate(device);
             cacheDevice(device);
         });
-        return new HeartbeatAckDto(request.isOnline(), MOCK_TIME, 15);
+        return new HeartbeatAckDto(request.isOnline(), Instant.now().getEpochSecond(), 15);
+    }
+
+    @Override
+    public PageEnvelope<PatrolMessageDto> messages(String targetId, int page, int pageSize) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            String safeTargetId = blankToDefault(targetId, LoginHelper.getUsername());
+            List<PatrolMessageDto> items = messageMapper.selectList(new LambdaQueryWrapper<PatrolMessage>()
+                    .orderByDesc(PatrolMessage::getSentAt))
+                .stream()
+                .filter(item -> isMessageVisible(item, safeTargetId))
+                .map(this::toMessageDto)
+                .toList();
+            return page(items, page, pageSize);
+        });
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public PatrolMessageDto readMessage(String messageId) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            PatrolMessage message = messageMapper.selectById(messageId);
+            if (message == null) {
+                throw new ServiceException("消息不存在");
+            }
+            int total = Math.max(value(message.getTotalCount(), 0), 1);
+            int read = Math.min(value(message.getReadCount(), 0) + 1, total);
+            message.setReadCount(read);
+            if (read >= total) {
+                message.setStatus("READ");
+            }
+            messageMapper.updateById(message);
+            saveAudit("MESSAGE", "App读取指挥消息", messageId, "SUCCESS");
+            return toMessageDto(message);
+        });
     }
 
     @Override
@@ -292,7 +351,23 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
 
     @Override
     public SosEventDto cancelSos() {
-        return new SosEventDto("SOS-CANCEL", "CANCELLED", "紧急上报已取消", null, false, null);
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            PatrolSosEvent event = sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
+                    .eq(PatrolSosEvent::getPhase, "ACTIVE")
+                    .orderByDesc(PatrolSosEvent::getCreateTime))
+                .stream()
+                .findFirst()
+                .orElse(null);
+            if (event == null) {
+                return new SosEventDto("SOS-CANCEL", "CANCELLED", "紧急上报已取消", null, false, null);
+            }
+            event.setPhase("CANCELLED");
+            event.setMessage("紧急上报已取消");
+            event.setRecordingAudio(false);
+            sosEventMapper.updateById(event);
+            saveAudit("SOS", "App取消SOS求助", event.getSosId(), "SUCCESS");
+            return toSosDto(event);
+        });
     }
 
     private LoginUser buildLoginUser(SysUserVo user) {
@@ -434,6 +509,64 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         RedisUtils.setCacheObject("patrol:device:" + device.getDeviceId(), toDeviceStatus(device), Duration.ofMinutes(5));
     }
 
+    private void saveCommand(String deviceId, DeviceCommandRequestDto request, String status, String resultMessage) {
+        PatrolDeviceCommand command = new PatrolDeviceCommand();
+        command.setTenantId(TENANT_ID);
+        command.setCommandId("CMD-" + UUID.randomUUID());
+        command.setDeviceId(deviceId);
+        command.setCommand(request.getCommand());
+        command.setOperatorId(blankToDefault(request.getOperatorId(), LoginHelper.getUsername()));
+        command.setRequestId(request.getRequestId());
+        command.setStatus(status);
+        command.setResultMessage(resultMessage);
+        command.setSentAt(new Date());
+        command.setAckAt(new Date());
+        command.setDelFlag("0");
+        commandMapper.insert(command);
+    }
+
+    private void saveLocationTrack(PatrolDevice device, HeartbeatRequestDto request) {
+        PatrolLocationTrack track = new PatrolLocationTrack();
+        track.setTenantId(TENANT_ID);
+        track.setTrackId("TRK-" + UUID.randomUUID());
+        track.setBadgeNo("POLICE_9527");
+        track.setOfficerName("张警官");
+        track.setDeviceId(device.getDeviceId());
+        track.setLatitude(request.getLatitude());
+        track.setLongitude(request.getLongitude());
+        track.setAccuracyMeters(request.getAccuracyMeters());
+        track.setAddress(blankToDefault(request.getAddress(), device.getAddress()));
+        track.setReportedAt(new Date());
+        track.setDelFlag("0");
+        locationTrackMapper.insert(track);
+    }
+
+    private void saveAudit(String logType, String action, String resource, String result) {
+        PatrolAuditLog log = new PatrolAuditLog();
+        log.setTenantId(TENANT_ID);
+        log.setLogId("AUD-" + UUID.randomUUID());
+        log.setLogType(logType);
+        log.setOperatorName(blankToDefault(LoginHelper.getUsername(), "app"));
+        log.setAction(action);
+        log.setResource(resource);
+        log.setResult(result);
+        log.setIpAddress("127.0.0.1");
+        log.setTraceId(UUID.randomUUID().toString());
+        log.setOccurredAt(new Date());
+        log.setDelFlag("0");
+        auditLogMapper.insert(log);
+    }
+
+    private boolean isMessageVisible(PatrolMessage message, String targetId) {
+        if ("ORG".equals(message.getTargetType())) {
+            return true;
+        }
+        if ("DEVICE".equals(message.getTargetType())) {
+            return DEVICE_ID.equals(message.getTargetId());
+        }
+        return targetId.equals(message.getTargetId());
+    }
+
     private DeviceStatusDto toDeviceStatus(PatrolDevice device) {
         return new DeviceStatusDto(device.getDeviceId(), device.getDeviceName(), Boolean.TRUE.equals(device.getOnline()), value(device.getBatteryPercent(), 0), value(device.getSignalBars(), 0), blankToDefault(device.getOnlineDuration(), "00:00:00"), value(device.getStorageUsedGb(), 0F), value(device.getStorageTotalGb(), 0F), blankToDefault(device.getFirmwareVersion(), ""), blankToDefault(device.getRecordingStatus(), "IDLE"), Boolean.TRUE.equals(device.getTalking()), Boolean.TRUE.equals(device.getCloudConnected()));
     }
@@ -449,6 +582,17 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private SosEventDto toSosDto(PatrolSosEvent event) {
         GpsLocationDto location = event.getLatitude() == null ? null : new GpsLocationDto(event.getLatitude(), event.getLongitude(), value(event.getAccuracyMeters(), 0F), event.getAddress());
         return new SosEventDto(event.getSosId(), event.getPhase(), event.getMessage(), location, Boolean.TRUE.equals(event.getRecordingAudio()), event.getBackupEtaMinutes());
+    }
+
+    private PatrolMessageDto toMessageDto(PatrolMessage message) {
+        return new PatrolMessageDto(
+            message.getMessageId(),
+            message.getTitle(),
+            message.getContent(),
+            message.getTargetType(),
+            message.getStatus(),
+            message.getSentAt() == null ? "" : message.getSentAt().toString()
+        );
     }
 
     private <T> PageEnvelope<T> page(List<T> items, int page, int pageSize) {

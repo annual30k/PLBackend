@@ -12,6 +12,7 @@ import org.dromara.patrol.entity.LoginRequestDto;
 import org.dromara.patrol.entity.MediaFileDto;
 import org.dromara.patrol.entity.PageEnvelope;
 import org.dromara.patrol.entity.PatrolAreaDto;
+import org.dromara.patrol.entity.PatrolMessageDto;
 import org.dromara.patrol.entity.ScannedDeviceDto;
 import org.dromara.patrol.entity.SosEventDto;
 import org.dromara.patrol.entity.StreamRelayRequestDto;
@@ -54,6 +55,10 @@ public interface IPatrolAppService {
     Boolean verifyMedia(String fileId);
 
     HeartbeatAckDto heartbeat(HeartbeatRequestDto request);
+
+    PageEnvelope<PatrolMessageDto> messages(String targetId, int page, int pageSize);
+
+    PatrolMessageDto readMessage(String messageId);
 
     StreamRelayStateDto startStream(StreamRelayRequestDto request);
 

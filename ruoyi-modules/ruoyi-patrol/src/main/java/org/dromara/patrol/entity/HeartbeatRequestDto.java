@@ -41,4 +41,24 @@ public class HeartbeatRequestDto {
      * 客户端时间戳
      */
     private long clientTimestamp;
+
+    /**
+     * 纬度
+     */
+    private Double latitude;
+
+    /**
+     * 经度
+     */
+    private Double longitude;
+
+    /**
+     * 定位精度（米）
+     */
+    private Float accuracyMeters;
+
+    /**
+     * 地址描述
+     */
+    private String address;
 }

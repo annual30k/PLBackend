@@ -15,6 +15,7 @@ import org.dromara.patrol.entity.LoginRequestDto;
 import org.dromara.patrol.entity.MediaFileDto;
 import org.dromara.patrol.entity.PageEnvelope;
 import org.dromara.patrol.entity.PatrolAreaDto;
+import org.dromara.patrol.entity.PatrolMessageDto;
 import org.dromara.patrol.entity.ScannedDeviceDto;
 import org.dromara.patrol.entity.SosEventDto;
 import org.dromara.patrol.entity.StreamRelayRequestDto;
@@ -121,6 +122,19 @@ public class PatrolAppApiController {
     @PostMapping("/realtime/heartbeat")
     public ApiEnvelope<HeartbeatAckDto> heartbeat(@RequestBody HeartbeatRequestDto request) {
         return ok(patrolAppService.heartbeat(request));
+    }
+
+    @GetMapping("/messages")
+    public ApiEnvelope<PageEnvelope<PatrolMessageDto>> messages(
+        @RequestParam(defaultValue = "") String targetId,
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return ok(patrolAppService.messages(targetId, page, pageSize));
+    }
+
+    @PostMapping("/messages/{messageId}/read")
+    public ApiEnvelope<PatrolMessageDto> readMessage(@PathVariable String messageId) {
+        return ok(patrolAppService.readMessage(messageId));
     }
 
     @PostMapping("/stream/start")

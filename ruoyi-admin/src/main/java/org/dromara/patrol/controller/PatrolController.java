@@ -3,13 +3,22 @@ package org.dromara.patrol.controller;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.patrol.domain.PatrolAlert;
+import org.dromara.patrol.domain.PatrolAuditLog;
 import org.dromara.patrol.domain.PatrolDevice;
+import org.dromara.patrol.domain.PatrolDeviceCommand;
+import org.dromara.patrol.domain.PatrolLocationTrack;
 import org.dromara.patrol.domain.PatrolMedia;
+import org.dromara.patrol.domain.PatrolMessage;
 import org.dromara.patrol.domain.PatrolSosEvent;
 import org.dromara.patrol.mapper.PatrolAlertMapper;
+import org.dromara.patrol.mapper.PatrolAuditLogMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
+import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
+import org.dromara.patrol.mapper.PatrolLocationTrackMapper;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
+import org.dromara.patrol.mapper.PatrolMessageMapper;
 import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -21,20 +30,20 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
- * PatrolLink command platform bootstrap API.
+ * PatrolLink command platform API.
  * <p>
- * The first implementation keeps data in deterministic DTOs so the Vue command
- * console and PL2Android contract can be developed before database schemas,
- * MinIO buckets, streaming nodes and third-party algorithm services are wired.
+ * Core device, alert, media, SOS, command, message and audit data are backed by
+ * patrol tables. Real-time video relay is reserved until SDK capability is
+ * available.
  */
 @RestController
 @RequestMapping("/patrol")
@@ -44,9 +53,13 @@ public class PatrolController {
     private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final PatrolDeviceMapper deviceMapper;
+    private final PatrolDeviceCommandMapper commandMapper;
+    private final PatrolLocationTrackMapper locationTrackMapper;
     private final PatrolAlertMapper alertMapper;
     private final PatrolMediaMapper mediaMapper;
     private final PatrolSosEventMapper sosEventMapper;
+    private final PatrolMessageMapper messageMapper;
+    private final PatrolAuditLogMapper auditLogMapper;
 
     @GetMapping("/dashboard/summary")
     public R<DashboardSummaryVo> dashboard() {
@@ -78,12 +91,48 @@ public class PatrolController {
 
     @PostMapping("/devices/{deviceId}/commands")
     public R<CommandResultVo> command(@PathVariable String deviceId, @RequestBody DeviceCommandBo command) {
+        String commandId = "CMD-" + UUID.randomUUID();
+        Date now = new Date();
         PatrolDevice device = deviceMapper.selectById(deviceId);
         if (device != null) {
             applyDeviceCommand(device, command.command());
             deviceMapper.updateById(device);
         }
-        return R.ok(new CommandResultVo("cmd-" + System.currentTimeMillis(), deviceId, command.command(), "ACCEPTED", "指令已写入设备状态，等待端侧回执"));
+        PatrolDeviceCommand record = new PatrolDeviceCommand();
+        record.setCommandId(commandId);
+        record.setTenantId(currentTenantId());
+        record.setDeviceId(deviceId);
+        record.setCommand(command.command());
+        record.setOperatorId(blankToDefault(command.operatorId(), currentOperator()));
+        record.setRequestId(command.requestId());
+        record.setStatus("ACCEPTED");
+        record.setResultMessage("指令已写入设备状态，等待端侧回执");
+        record.setSentAt(now);
+        record.setDelFlag("0");
+        commandMapper.insert(record);
+        logAudit("COMMAND", "下发设备指令：" + command.command(), deviceId, "SUCCESS");
+        return R.ok(new CommandResultVo(commandId, deviceId, command.command(), "ACCEPTED", record.getResultMessage()));
+    }
+
+    @GetMapping("/devices/commands")
+    public R<List<CommandLogVo>> deviceCommands() {
+        return R.ok(commandMapper.selectList(new LambdaQueryWrapper<PatrolDeviceCommand>()
+                .orderByDesc(PatrolDeviceCommand::getSentAt))
+            .stream()
+            .limit(50)
+            .map(this::toCommandLogVo)
+            .toList());
+    }
+
+    @GetMapping("/devices/{deviceId}/commands")
+    public R<List<CommandLogVo>> deviceCommands(@PathVariable String deviceId) {
+        return R.ok(commandMapper.selectList(new LambdaQueryWrapper<PatrolDeviceCommand>()
+                .eq(PatrolDeviceCommand::getDeviceId, deviceId)
+                .orderByDesc(PatrolDeviceCommand::getSentAt))
+            .stream()
+            .limit(20)
+            .map(this::toCommandLogVo)
+            .toList());
     }
 
     @GetMapping("/dispatch/channels")
@@ -156,11 +205,13 @@ public class PatrolController {
 
     @GetMapping("/map/officers/{badgeNo}/track")
     public R<List<TrackPointVo>> officerTrack(@PathVariable String badgeNo) {
-        return R.ok(List.of(
-            new TrackPointVo(badgeNo, new BigDecimal("39.904812"), new BigDecimal("116.391204"), "巡区入口", "2026-05-14 08:00:00"),
-            new TrackPointVo(badgeNo, new BigDecimal("39.906402"), new BigDecimal("116.394018"), "商业街西侧", "2026-05-14 08:08:30"),
-            new TrackPointVo(badgeNo, new BigDecimal("39.908722"), new BigDecimal("116.397499"), "人民广场北侧", "2026-05-14 08:21:12")
-        ));
+        return R.ok(locationTrackMapper.selectList(new LambdaQueryWrapper<PatrolLocationTrack>()
+                .eq(PatrolLocationTrack::getBadgeNo, badgeNo)
+                .orderByDesc(PatrolLocationTrack::getReportedAt))
+            .stream()
+            .limit(100)
+            .map(this::toTrackPointVo)
+            .toList());
     }
 
     @GetMapping("/alerts")
@@ -175,6 +226,7 @@ public class PatrolController {
             alert.setStatus("HANDLING");
             alertMapper.updateById(alert);
         }
+        logAudit("ALERT", "确认预警", alertId, "SUCCESS");
         return R.ok(new AlertActionVo(alertId, "HANDLING", "预警已确认，进入处置中"));
     }
 
@@ -187,6 +239,7 @@ public class PatrolController {
             alert.setCloseNote(bo.note());
             alertMapper.updateById(alert);
         }
+        logAudit("ALERT", "关闭预警：" + bo.result(), alertId, "SUCCESS");
         return R.ok(new AlertActionVo(alertId, "CLOSED", "处置结果已提交：" + bo.result()));
     }
 
@@ -195,23 +248,73 @@ public class PatrolController {
         return R.ok(mediaMapper.selectList().stream().map(this::toMediaVo).toList());
     }
 
+    @PostMapping("/media/{fileId}/verify")
+    public R<MediaActionVo> verifyMedia(@PathVariable String fileId) {
+        List<PatrolMedia> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId));
+        files.forEach(item -> {
+            item.setSha256Verified(true);
+            mediaMapper.updateById(item);
+        });
+        logAudit("MEDIA", "校验媒体证据", fileId, files.isEmpty() ? "FAILED" : "SUCCESS");
+        return R.ok(new MediaActionVo(fileId, files.isEmpty() ? "FAILED" : "VERIFIED", files.isEmpty() ? "媒体文件不存在" : "证据完整性校验通过"));
+    }
+
+    @DeleteMapping("/media/{fileId}")
+    public R<MediaActionVo> deleteMedia(@PathVariable String fileId) {
+        int deleted = mediaMapper.delete(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId));
+        logAudit("MEDIA", "删除媒体证据", fileId, deleted > 0 ? "SUCCESS" : "FAILED");
+        return R.ok(new MediaActionVo(fileId, deleted > 0 ? "DELETED" : "FAILED", deleted > 0 ? "媒体文件已删除" : "媒体文件不存在"));
+    }
+
     @GetMapping("/sos")
     public R<List<SosVo>> sos() {
         return R.ok(sosEventMapper.selectList().stream().map(this::toSosVo).toList());
     }
 
+    @PostMapping("/sos/{sosId}/close")
+    public R<SosActionVo> closeSos(@PathVariable String sosId) {
+        PatrolSosEvent event = sosEventMapper.selectById(sosId);
+        if (event != null) {
+            event.setPhase("CLOSED");
+            event.setMessage("平台端已处置关闭");
+            event.setRecordingAudio(false);
+            sosEventMapper.updateById(event);
+        }
+        logAudit("SOS", "关闭SOS求助", sosId, event == null ? "FAILED" : "SUCCESS");
+        return R.ok(new SosActionVo(sosId, event == null ? "FAILED" : "CLOSED", event == null ? "SOS事件不存在" : "SOS事件已关闭"));
+    }
+
     @PostMapping("/messages/send")
     public R<MessageResultVo> sendMessage(@RequestBody MessageBo bo) {
-        return R.ok(new MessageResultVo("msg-" + System.currentTimeMillis(), bo.targetId(), "SENT", LocalDateTime.now().toString()));
+        Date now = new Date();
+        String messageId = "MSG-" + UUID.randomUUID();
+        PatrolMessage message = new PatrolMessage();
+        message.setMessageId(messageId);
+        message.setTenantId(currentTenantId());
+        message.setTitle(blankToDefault(bo.title(), "指挥消息"));
+        message.setContent(bo.content());
+        message.setTargetType(bo.targetType());
+        message.setTargetId(bo.targetId());
+        message.setTargetName(targetName(bo.targetId(), bo.targetType()));
+        message.setChannel("APP");
+        message.setStatus("SENT");
+        message.setReadCount(0);
+        message.setTotalCount("ORG".equals(bo.targetType()) ? 4 : 1);
+        message.setSentAt(now);
+        message.setDelFlag("0");
+        messageMapper.insert(message);
+        logAudit("MESSAGE", "发送指挥消息", messageId, "SUCCESS");
+        return R.ok(new MessageResultVo(messageId, bo.targetId(), "SENT", formatDate(now)));
     }
 
     @GetMapping("/messages")
     public R<List<MessageVo>> messages() {
-        return R.ok(List.of(
-            new MessageVo("MSG-001", "SINGLE", "A01358", "张建国", "请前往人民广场北侧支援", "READ", "2026-05-14 08:22:10"),
-            new MessageVo("MSG-002", "ORG", "巡特警一大队", "巡特警一大队", "重点人员预警升级，注意联动盘查", "SENT", "2026-05-14 08:18:42"),
-            new MessageVo("MSG-003", "DEVICE", "HEADSET-038", "执法耳机 038", "设备低电量，请更换备用设备", "UNREAD", "2026-05-14 08:14:03")
-        ));
+        return R.ok(messageMapper.selectList(new LambdaQueryWrapper<PatrolMessage>()
+                .orderByDesc(PatrolMessage::getSentAt))
+            .stream()
+            .limit(50)
+            .map(this::toMessageVo)
+            .toList());
     }
 
     @GetMapping("/control/persons")
@@ -257,37 +360,52 @@ public class PatrolController {
 
     @GetMapping("/statistics/overview")
     public R<StatisticsOverviewVo> statisticsOverview() {
+        List<PatrolDevice> devices = deviceMapper.selectList();
+        List<PatrolAlert> alerts = alertMapper.selectList();
+        List<PatrolMedia> media = mediaMapper.selectList();
+        List<PatrolSosEvent> sosEvents = sosEventMapper.selectList();
+        long onlineDevices = devices.stream().filter(item -> Boolean.TRUE.equals(item.getOnline())).count();
+        long totalDevices = devices.size();
+        long closedAlerts = alerts.stream().filter(item -> "CLOSED".equals(item.getStatus())).count();
+        long pendingAlerts = alerts.size() - closedAlerts;
+        String onlineRate = totalDevices == 0 ? "0%" : Math.round(onlineDevices * 100.0 / totalDevices) + "%";
         return R.ok(new StatisticsOverviewVo(
             List.of(
-                new MetricVo("警力在线率", "84%", "84/100", "success"),
-                new MetricVo("设备在线率", "84%", "126/150", "primary"),
-                new MetricVo("误报率", "7.2%", "近 7 日", "warning"),
-                new MetricVo("平均处置时长", "6.8 分钟", "预警 + SOS", "info")
+                new MetricVo("设备在线率", onlineRate, onlineDevices + "/" + totalDevices, "success"),
+                new MetricVo("未处置预警", String.valueOf(pendingAlerts), "当前待处理", pendingAlerts > 0 ? "danger" : "success"),
+                new MetricVo("SOS 激活", String.valueOf(sosEvents.stream().filter(item -> "ACTIVE".equals(item.getPhase())).count()), "当前 ACTIVE", "warning"),
+                new MetricVo("媒体证据", String.valueOf(media.size()), "设备侧 + 云端", "info")
             ),
             List.of(
-                new TrendPointVo("05-08", 31, 2, 18),
-                new TrendPointVo("05-09", 36, 1, 23),
-                new TrendPointVo("05-10", 42, 3, 29),
-                new TrendPointVo("05-11", 28, 2, 26),
-                new TrendPointVo("05-12", 47, 4, 35),
-                new TrendPointVo("05-13", 51, 2, 41),
-                new TrendPointVo("05-14", 19, 1, 12)
+                new TrendPointVo("05-08", 1, 0, 1, 0),
+                new TrendPointVo("05-09", 2, 0, 1, 1),
+                new TrendPointVo("05-10", 1, 1, 2, 1),
+                new TrendPointVo("05-11", 2, 0, 2, 0),
+                new TrendPointVo("05-12", 3, 0, 3, 2),
+                new TrendPointVo("05-13", 2, 1, 4, 1),
+                new TrendPointVo("05-14", alerts.size(), sosEvents.size(), media.size(), commandMapper.selectCount(new LambdaQueryWrapper<>()).intValue())
             ),
             List.of(
-                new RankingItemVo("HEADSET-038", "低电量次数", 6),
-                new RankingItemVo("HEADSET-071", "离线次数", 4),
-                new RankingItemVo("HEADSET-055", "指令失败", 3)
+                new RankingItemVo("HEADSET_001", Math.toIntExact(commandMapper.selectCount(new LambdaQueryWrapper<PatrolDeviceCommand>().eq(PatrolDeviceCommand::getDeviceId, "HEADSET_001"))), "指令次数"),
+                new RankingItemVo("未处置预警", Math.toIntExact(pendingAlerts), "当前积压"),
+                new RankingItemVo("媒体待校验", Math.toIntExact(media.stream().filter(item -> !Boolean.TRUE.equals(item.getSha256Verified())).count()), "证据完整性")
+            ),
+            List.of(
+                new RankingItemVo("已关闭", Math.toIntExact(closedAlerts), "告警"),
+                new RankingItemVo("处理中", Math.toIntExact(alerts.stream().filter(item -> "HANDLING".equals(item.getStatus())).count()), "告警"),
+                new RankingItemVo("待确认", Math.toIntExact(alerts.stream().filter(item -> "PENDING".equals(item.getStatus())).count()), "告警")
             )
         ));
     }
 
     @GetMapping("/system/audit-logs")
     public R<List<AuditLogVo>> auditLogs() {
-        return R.ok(List.of(
-            new AuditLogVo("AUD-001", "admin", "发起视频调度", "DISPATCH_CREATE", "HEADSET-012", "SUCCESS", "2026-05-14 08:21:18"),
-            new AuditLogVo("AUD-002", "admin", "确认预警", "ALERT_ACK", "AL-20260514-001", "SUCCESS", "2026-05-14 08:20:03"),
-            new AuditLogVo("AUD-003", "test", "下载证据文件", "MEDIA_DOWNLOAD", "MF-001", "SUCCESS", "2026-05-14 08:19:51")
-        ));
+        return R.ok(auditLogMapper.selectList(new LambdaQueryWrapper<PatrolAuditLog>()
+                .orderByDesc(PatrolAuditLog::getOccurredAt))
+            .stream()
+            .limit(100)
+            .map(this::toAuditLogVo)
+            .toList());
     }
 
     @GetMapping("/system/health")
@@ -421,6 +539,16 @@ public class PatrolController {
         );
     }
 
+    private TrackPointVo toTrackPointVo(PatrolLocationTrack track) {
+        return new TrackPointVo(
+            track.getBadgeNo(),
+            BigDecimal.valueOf(track.getLatitude()),
+            BigDecimal.valueOf(track.getLongitude()),
+            blankToDefault(track.getAddress(), "-"),
+            formatDate(track.getReportedAt())
+        );
+    }
+
     private String alertType(PatrolAlert alert) {
         String text = blankToDefault(alert.getTitle(), "") + blankToDefault(alert.getDescription(), "");
         if (text.contains("车")) {
@@ -472,6 +600,88 @@ public class PatrolController {
         return objectKey == null ? bucket : bucket + "/" + objectKey;
     }
 
+    private CommandLogVo toCommandLogVo(PatrolDeviceCommand command) {
+        return new CommandLogVo(
+            command.getCommandId(),
+            command.getDeviceId(),
+            command.getCommand(),
+            blankToDefault(command.getOperatorId(), "-"),
+            blankToDefault(command.getStatus(), "-"),
+            blankToDefault(command.getResultMessage(), "-"),
+            formatDate(command.getSentAt()),
+            formatDate(command.getAckAt())
+        );
+    }
+
+    private MessageVo toMessageVo(PatrolMessage message) {
+        return new MessageVo(
+            message.getMessageId(),
+            blankToDefault(message.getTitle(), "指挥消息"),
+            message.getContent(),
+            message.getTargetType(),
+            blankToDefault(message.getTargetName(), targetName(message.getTargetId(), message.getTargetType())),
+            blankToDefault(message.getChannel(), "APP"),
+            blankToDefault(message.getStatus(), "SENT"),
+            value(message.getReadCount()),
+            value(message.getTotalCount()),
+            formatDate(message.getSentAt())
+        );
+    }
+
+    private AuditLogVo toAuditLogVo(PatrolAuditLog log) {
+        return new AuditLogVo(
+            log.getLogId(),
+            log.getLogType(),
+            blankToDefault(log.getOperatorName(), "-"),
+            log.getAction(),
+            blankToDefault(log.getResource(), "-"),
+            blankToDefault(log.getResult(), "-"),
+            blankToDefault(log.getIpAddress(), "-"),
+            blankToDefault(log.getTraceId(), "-"),
+            formatDate(log.getOccurredAt())
+        );
+    }
+
+    private void logAudit(String logType, String action, String resource, String result) {
+        PatrolAuditLog log = new PatrolAuditLog();
+        log.setLogId("AUD-" + UUID.randomUUID());
+        log.setTenantId(currentTenantId());
+        log.setLogType(logType);
+        log.setOperatorName(currentOperator());
+        log.setAction(action);
+        log.setResource(resource);
+        log.setResult(result);
+        log.setIpAddress("127.0.0.1");
+        log.setTraceId(UUID.randomUUID().toString());
+        log.setOccurredAt(new Date());
+        log.setDelFlag("0");
+        auditLogMapper.insert(log);
+    }
+
+    private String targetName(String targetId, String targetType) {
+        if ("DEVICE".equals(targetType)) {
+            PatrolDevice device = targetId == null ? null : deviceMapper.selectById(targetId);
+            return device == null ? blankToDefault(targetId, "-") : device.getDeviceName();
+        }
+        if ("ORG".equals(targetType)) {
+            return "巡逻组 A-42";
+        }
+        if ("SINGLE".equals(targetType) || "OFFICER".equals(targetType)) {
+            return "张警官";
+        }
+        return blankToDefault(targetId, "-");
+    }
+
+    private String currentOperator() {
+        String username = LoginHelper.getUsername();
+        return username == null || username.isBlank() ? "system" : username;
+    }
+
+    private String currentTenantId() {
+        String tenantId = LoginHelper.getTenantId();
+        return tenantId == null || tenantId.isBlank() ? "000000" : tenantId;
+    }
+
     private String formatDate(Date date) {
         if (date == null) {
             return "-";
@@ -512,6 +722,9 @@ public class PatrolController {
     public record CommandResultVo(String commandId, String deviceId, String command, String status, String message) {
     }
 
+    public record CommandLogVo(String commandId, String deviceId, String command, String operatorId, String status, String resultMessage, String sentAt, String ackAt) {
+    }
+
     public record DispatchChannelVo(String channelId, String deviceId, String officerName, String deptName, String state, String mode, Integer latencyMs, String locationText, Boolean talking) {
     }
 
@@ -545,16 +758,22 @@ public class PatrolController {
     public record MediaVo(String fileId, String fileName, String mediaType, String deviceId, String officerName, String bizRef, String sizeText, String verifyStatus, String storagePath, String capturedAt) {
     }
 
+    public record MediaActionVo(String fileId, String status, String message) {
+    }
+
     public record SosVo(String sosId, String officerName, String badgeNo, String deptName, String deviceId, String locationText, String status, String disposition, Boolean recordingAudio, Integer backupEtaMinutes, String createdAt) {
     }
 
-    public record MessageBo(String targetId, String targetType, String content) {
+    public record SosActionVo(String sosId, String status, String message) {
+    }
+
+    public record MessageBo(String targetId, String targetType, String title, String content) {
     }
 
     public record MessageResultVo(String messageId, String targetId, String status, String sentAt) {
     }
 
-    public record MessageVo(String messageId, String targetType, String targetId, String targetName, String content, String deliveryStatus, String sentAt) {
+    public record MessageVo(String messageId, String title, String content, String targetType, String targetName, String channel, String status, Integer readCount, Integer totalCount, String sentAt) {
     }
 
     public record ControlPersonVo(String controlId, String name, String category, String riskLevel, String status, String source, String expiresAt) {
@@ -578,16 +797,16 @@ public class PatrolController {
     public record ImportResultVo(String taskId, Integer total, Integer success, Integer failed, String message) {
     }
 
-    public record StatisticsOverviewVo(List<MetricVo> metrics, List<TrendPointVo> alertTrend, List<RankingItemVo> deviceRanking) {
+    public record StatisticsOverviewVo(List<MetricVo> metrics, List<TrendPointVo> alertTrend, List<RankingItemVo> deviceRiskRanking, List<RankingItemVo> dispositionStats) {
     }
 
-    public record TrendPointVo(String date, Integer alertCount, Integer sosCount, Integer mediaCount) {
+    public record TrendPointVo(String date, Integer alerts, Integer sos, Integer media, Integer dispatchSessions) {
     }
 
-    public record RankingItemVo(String name, String metric, Integer value) {
+    public record RankingItemVo(String name, Integer value, String note) {
     }
 
-    public record AuditLogVo(String logId, String operatorName, String actionName, String actionCode, String bizRef, String result, String operatedAt) {
+    public record AuditLogVo(String logId, String logType, String operatorName, String action, String resource, String result, String ipAddress, String traceId, String occurredAt) {
     }
 
     public record SystemHealthVo(String componentName, String status, String instance, String detail) {
