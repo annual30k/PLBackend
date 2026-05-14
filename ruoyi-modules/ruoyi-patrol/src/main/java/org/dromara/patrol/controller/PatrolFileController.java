@@ -2,6 +2,7 @@ package org.dromara.patrol.controller;
 
 import cn.hutool.core.util.IdUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import cn.dev33.satoken.annotation.SaIgnore;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
@@ -94,6 +95,7 @@ public class PatrolFileController {
         return ok(toMediaDto(media));
     }
 
+    @SaIgnore
     @GetMapping("/{fileId}/download")
     public void download(@PathVariable String fileId, HttpServletResponse response) throws IOException {
         PatrolMedia media = findMedia(fileId);
@@ -166,7 +168,7 @@ public class PatrolFileController {
         if (type.startsWith("image/") || lower.matches(".*\\.(jpg|jpeg|png|webp|bmp)$")) {
             return "PHOTO";
         }
-        if (type.startsWith("audio/") || lower.matches(".*\\.(mp3|wav|aac|m4a|amr)$")) {
+        if (type.startsWith("audio/") || lower.matches(".*\\.(mp3|wav|aac|m4a|amr|opus)$")) {
             return "AUDIO";
         }
         return "VIDEO";

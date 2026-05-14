@@ -22,6 +22,7 @@ import org.dromara.patrol.domain.PatrolAlertDisposition;
 import org.dromara.patrol.domain.PatrolAppVersion;
 import org.dromara.patrol.domain.PatrolArea;
 import org.dromara.patrol.domain.PatrolAuditLog;
+import org.dromara.patrol.domain.PatrolControlPerson;
 import org.dromara.patrol.domain.PatrolDevice;
 import org.dromara.patrol.domain.PatrolDeviceBinding;
 import org.dromara.patrol.domain.PatrolDeviceCommand;
@@ -31,19 +32,28 @@ import org.dromara.patrol.domain.PatrolLocationTrack;
 import org.dromara.patrol.domain.PatrolMedia;
 import org.dromara.patrol.domain.PatrolMediaUploadTask;
 import org.dromara.patrol.domain.PatrolMessage;
+import org.dromara.patrol.domain.PatrolMessageReceipt;
 import org.dromara.patrol.domain.PatrolSosEvent;
 import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.AuthSessionDto;
+import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
 import org.dromara.patrol.entity.DeviceControlResultDto;
 import org.dromara.patrol.entity.DeviceStatusDto;
 import org.dromara.patrol.entity.DeviceWifiStateDto;
+import org.dromara.patrol.entity.FaceLibraryAckRequestDto;
+import org.dromara.patrol.entity.FaceLibraryPackageDto;
+import org.dromara.patrol.entity.FaceLibraryPersonDto;
 import org.dromara.patrol.entity.GpsLocationDto;
 import org.dromara.patrol.entity.HeartbeatAckDto;
 import org.dromara.patrol.entity.HeartbeatRequestDto;
+import org.dromara.patrol.entity.IntercomSessionDto;
+import org.dromara.patrol.entity.IntercomSessionRequestDto;
+import org.dromara.patrol.entity.IntercomSignalDto;
+import org.dromara.patrol.entity.IntercomSignalRequestDto;
 import org.dromara.patrol.entity.LoginRequestDto;
 import org.dromara.patrol.entity.MediaFileDto;
 import org.dromara.patrol.entity.MediaUploadTaskCreateDto;
@@ -66,6 +76,7 @@ import org.dromara.patrol.mapper.PatrolAlertDispositionMapper;
 import org.dromara.patrol.mapper.PatrolAlertMapper;
 import org.dromara.patrol.mapper.PatrolAreaMapper;
 import org.dromara.patrol.mapper.PatrolAuditLogMapper;
+import org.dromara.patrol.mapper.PatrolControlPersonMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
 import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
 import org.dromara.patrol.mapper.PatrolDeviceBindingMapper;
@@ -75,6 +86,7 @@ import org.dromara.patrol.mapper.PatrolLocationTrackMapper;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
 import org.dromara.patrol.mapper.PatrolMediaUploadTaskMapper;
 import org.dromara.patrol.mapper.PatrolMessageMapper;
+import org.dromara.patrol.mapper.PatrolMessageReceiptMapper;
 import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.dromara.patrol.service.IPatrolAppService;
 import org.dromara.patrol.service.PatrolRealtimePublisher;
@@ -121,6 +133,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private static final String APP_CLIENT_KEY = "app";
     private static final String DEVICE_ID = "HEADSET_001";
     private static final long DEFAULT_CHUNK_SIZE = 8L * 1024L * 1024L;
+    private static final Duration INTERCOM_TTL = Duration.ofMinutes(30);
+    private static final String INTERCOM_SESSION_PREFIX = "patrol:intercom:session:";
+    private static final String INTERCOM_PENDING_PREFIX = "patrol:intercom:pending:";
+    private static final String INTERCOM_SIGNAL_PREFIX = "patrol:intercom:signals:";
 
     private final SysUserMapper userMapper;
     private final ISysDeptService deptService;
@@ -137,10 +153,12 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private final PatrolMediaMapper mediaMapper;
     private final PatrolMediaUploadTaskMapper mediaUploadTaskMapper;
     private final PatrolMessageMapper messageMapper;
+    private final PatrolMessageReceiptMapper messageReceiptMapper;
     private final PatrolAuditLogMapper auditLogMapper;
     private final PatrolAreaMapper areaMapper;
     private final PatrolSosEventMapper sosEventMapper;
     private final PatrolAppVersionMapper appVersionMapper;
+    private final PatrolControlPersonMapper controlPersonMapper;
     private final PatrolRealtimePublisher realtimePublisher;
 
     @Override
@@ -718,15 +736,21 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public PageEnvelope<PatrolMessageDto> messages(String targetId, int page, int pageSize) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             String safeTargetId = blankToDefault(targetId, LoginHelper.getUsername());
-            List<PatrolMessageDto> items = messageMapper.selectList(new LambdaQueryWrapper<PatrolMessage>()
-                    .orderByDesc(PatrolMessage::getSentAt))
-                .stream()
-                .filter(item -> isMessageVisible(item, safeTargetId))
-                .map(this::toMessageDto)
-                .toList();
+            List<PatrolMessageDto> items = new ArrayList<>();
+            for (PatrolMessage message : messageMapper.selectList(new LambdaQueryWrapper<PatrolMessage>().orderByDesc(PatrolMessage::getSentAt))) {
+                PatrolMessageReceipt receipt = visibleReceipt(message.getMessageId(), safeTargetId);
+                if (receipt != null) {
+                    markReceiptDelivered(receipt);
+                    PatrolMessage syncedMessage = syncMessageDeliverySummary(message.getMessageId());
+                    items.add(toMessageDto(syncedMessage == null ? message : syncedMessage, receipt));
+                } else if (isMessageVisible(message, safeTargetId)) {
+                    items.add(toMessageDto(message, null));
+                }
+            }
             return page(items, page, pageSize);
         });
     }
@@ -739,17 +763,29 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             if (message == null) {
                 throw new ServiceException("消息不存在");
             }
-            int total = Math.max(value(message.getTotalCount(), 0), 1);
-            int read = Math.min(value(message.getReadCount(), 0) + 1, total);
-            message.setReadCount(read);
-            if (read >= total) {
-                message.setStatus("READ");
+            PatrolMessageReceipt receipt = visibleReceipt(messageId, LoginHelper.getUsername());
+            if (receipt != null) {
+                receipt.setDeliveryStatus("READ");
+                if (receipt.getDeliveredAt() == null) {
+                    receipt.setDeliveredAt(new Date());
+                }
+                receipt.setReadAt(new Date());
+                receipt.setLastPullAt(new Date());
+                messageReceiptMapper.updateById(receipt);
+                message = syncMessageDeliverySummary(messageId);
+            } else {
+                int total = Math.max(value(message.getTotalCount(), 0), 1);
+                int read = Math.min(value(message.getReadCount(), 0) + 1, total);
+                message.setReadCount(read);
+                if (read >= total) {
+                    message.setStatus("READ");
+                }
+                messageMapper.updateById(message);
             }
-            messageMapper.updateById(message);
             saveAudit("MESSAGE", "App读取指挥消息", messageId, "SUCCESS");
             realtimePublisher.publish("MESSAGE_READ", "messages", "指挥消息已读", message.getTitle(), messageId,
-                realtimePublisher.payload("messageId", messageId, "readCount", read, "totalCount", total, "status", message.getStatus()));
-            return toMessageDto(message);
+                realtimePublisher.payload("messageId", messageId, "readCount", message.getReadCount(), "totalCount", message.getTotalCount(), "status", message.getStatus()));
+            return toMessageDto(message, receipt);
         });
     }
 
@@ -763,6 +799,135 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Override
     public StreamRelayStateDto stopStream() {
         return new StreamRelayStateDto("IDLE", null, null);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public IntercomSessionDto createIntercomSession(IntercomSessionRequestDto request) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            String deviceId = blankToDefault(request.getDeviceId(), DEVICE_ID);
+            PatrolDevice device = deviceMapper.selectById(deviceId);
+            if (device == null) {
+                throw new ServiceException("设备不存在：" + deviceId);
+            }
+            long now = System.currentTimeMillis();
+            String sessionId = "IC-" + IdUtil.fastSimpleUUID();
+            IntercomSessionDto session = new IntercomSessionDto(
+                sessionId,
+                deviceId,
+                "WAITING_APP",
+                blankToDefault(request.getMode(), "FULL_DUPLEX"),
+                "/api/v1/intercom/sessions/" + sessionId + "/signals",
+                "BLUETOOTH_HEADSET_SCO_PREFERRED",
+                List.of("stun:turn.patrollink.local:3478", "turn:turn.patrollink.local:3478?transport=udp"),
+                now,
+                now + INTERCOM_TTL.toMillis(),
+                "已创建 WebRTC/VoIP 对讲会话，等待 App 接入蓝牙耳机音频路由"
+            );
+            saveIntercomSession(session);
+            RedisUtils.setCacheObject(INTERCOM_PENDING_PREFIX + deviceId, sessionId, INTERCOM_TTL);
+            saveDeviceEvent(deviceId, "INTERCOM", "INFO", "对讲会话创建", "Web端发起WebRTC/VoIP对讲，会话：" + sessionId);
+            saveAudit("INTERCOM", "创建WebRTC/VoIP对讲会话", sessionId, "SUCCESS");
+            realtimePublisher.publish("INTERCOM_SESSION", "dispatch", "对讲会话已创建", deviceId + " 等待 App 接入", sessionId,
+                realtimePublisher.payload("sessionId", sessionId, "deviceId", deviceId, "state", session.getState(), "audioRoute", session.getAudioRoute()));
+            return session;
+        });
+    }
+
+    @Override
+    public IntercomSessionDto pendingIntercomSession(String deviceId) {
+        String sessionId = RedisUtils.getCacheObject(INTERCOM_PENDING_PREFIX + blankToDefault(deviceId, DEVICE_ID));
+        if (sessionId == null) {
+            return null;
+        }
+        IntercomSessionDto session = intercomSession(sessionId);
+        return session == null || "CLOSED".equals(session.getState()) ? null : session;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public IntercomSessionDto acceptIntercomSession(String sessionId) {
+        IntercomSessionDto session = requireIntercomSession(sessionId);
+        session.setState("SIGNALING");
+        session.setMessage("App 已接入，会话进入 WebRTC 信令交换");
+        saveIntercomSession(session);
+        PatrolDevice device = deviceMapper.selectById(session.getDeviceId());
+        if (device != null) {
+            device.setTalking(true);
+            deviceMapper.updateById(device);
+            cacheDevice(device);
+        }
+        saveDeviceEvent(session.getDeviceId(), "INTERCOM", "INFO", "App接入对讲会话", "蓝牙耳机音频路由准备接入：" + sessionId);
+        realtimePublisher.publish("INTERCOM_SESSION", "dispatch", "App 已接入对讲", session.getDeviceId() + " 开始信令交换", sessionId,
+            realtimePublisher.payload("sessionId", sessionId, "deviceId", session.getDeviceId(), "state", session.getState()));
+        return session;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public IntercomSessionDto closeIntercomSession(String sessionId) {
+        IntercomSessionDto session = requireIntercomSession(sessionId);
+        session.setState("CLOSED");
+        session.setMessage("对讲会话已关闭");
+        saveIntercomSession(session);
+        RedisUtils.deleteObject(INTERCOM_PENDING_PREFIX + session.getDeviceId());
+        PatrolDevice device = deviceMapper.selectById(session.getDeviceId());
+        if (device != null) {
+            device.setTalking(false);
+            deviceMapper.updateById(device);
+            cacheDevice(device);
+        }
+        saveDeviceEvent(session.getDeviceId(), "INTERCOM", "INFO", "对讲会话关闭", "WebRTC/VoIP对讲会话关闭：" + sessionId);
+        saveAudit("INTERCOM", "关闭WebRTC/VoIP对讲会话", sessionId, "SUCCESS");
+        realtimePublisher.publish("INTERCOM_SESSION", "dispatch", "对讲会话已关闭", session.getDeviceId() + " 对讲结束", sessionId,
+            realtimePublisher.payload("sessionId", sessionId, "deviceId", session.getDeviceId(), "state", session.getState()));
+        return session;
+    }
+
+    @Override
+    public IntercomSignalDto sendIntercomSignal(String sessionId, IntercomSignalRequestDto request) {
+        IntercomSessionDto session = requireIntercomSession(sessionId);
+        if ("CLOSED".equals(session.getState())) {
+            throw new ServiceException("对讲会话已关闭");
+        }
+        long now = System.currentTimeMillis();
+        IntercomSignalDto signal = new IntercomSignalDto(
+            "SIG-" + IdUtil.fastSimpleUUID(),
+            sessionId,
+            blankToDefault(request.getSender(), "UNKNOWN"),
+            blankToDefault(request.getType(), "message"),
+            blankToDefault(request.getPayload(), ""),
+            now
+        );
+        RedisUtils.addCacheList(INTERCOM_SIGNAL_PREFIX + sessionId, signal);
+        RedisUtils.getClient().getList(INTERCOM_SIGNAL_PREFIX + sessionId).expire(INTERCOM_TTL);
+        if ("hangup".equalsIgnoreCase(signal.getType())) {
+            closeIntercomSession(sessionId);
+        } else if (!"ACTIVE".equals(session.getState())) {
+            session.setState("SIGNALING");
+            session.setMessage("WebRTC 信令交换中");
+            saveIntercomSession(session);
+        }
+        realtimePublisher.publish("INTERCOM_SIGNAL", "dispatch", "对讲信令已转发", signal.getSender() + ":" + signal.getType(), sessionId,
+            realtimePublisher.payload("sessionId", sessionId, "signalId", signal.getSignalId(), "sender", signal.getSender(), "type", signal.getType()));
+        return signal;
+    }
+
+    @Override
+    public List<IntercomSignalDto> intercomSignals(String sessionId, String afterSignalId) {
+        requireIntercomSession(sessionId);
+        List<IntercomSignalDto> signals = RedisUtils.getCacheList(INTERCOM_SIGNAL_PREFIX + sessionId);
+        if (afterSignalId == null || afterSignalId.isBlank()) {
+            return signals;
+        }
+        int index = -1;
+        for (int i = 0; i < signals.size(); i++) {
+            if (afterSignalId.equals(signals.get(i).getSignalId())) {
+                index = i;
+                break;
+            }
+        }
+        return index < 0 || index + 1 >= signals.size() ? List.of() : signals.subList(index + 1, signals.size());
     }
 
     @Override
@@ -843,6 +1008,78 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         });
     }
 
+    @Override
+    public FaceLibraryPackageDto faceLibraryPackage(String deviceId, String currentVersion, boolean force) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            Date now = new Date();
+            List<PatrolControlPerson> persons = controlPersonMapper.selectList(new LambdaQueryWrapper<PatrolControlPerson>()
+                .eq(PatrolControlPerson::getStatus, "ENABLED")
+                .and(wrapper -> wrapper.isNull(PatrolControlPerson::getExpiresAt).or().gt(PatrolControlPerson::getExpiresAt, now))
+                .orderByAsc(PatrolControlPerson::getControlId));
+            String version = faceLibraryVersion(persons);
+            if (!force && version.equals(currentVersion)) {
+                return new FaceLibraryPackageDto(version, "PLBackend", true, "opencv-zoo-yunet+sface", blankToDefault(deviceId, DEVICE_ID), true, Instant.now().toEpochMilli(), List.of());
+            }
+            List<FaceLibraryPersonDto> records = persons.stream()
+                .map(this::toFaceLibraryPerson)
+                .toList();
+            return new FaceLibraryPackageDto(version, "PLBackend", true, "opencv-zoo-yunet+sface", blankToDefault(deviceId, DEVICE_ID), false, Instant.now().toEpochMilli(), records);
+        });
+    }
+
+    @Override
+    public DeviceControlResultDto acknowledgeFaceLibrary(FaceLibraryAckRequestDto request) {
+        String deviceId = blankToDefault(request.getDeviceId(), DEVICE_ID);
+        String message = "人脸库同步确认 version=" + blankToDefault(request.getVersion(), "-")
+            + " applied=" + value(request.getApplied(), 0)
+            + " pending=" + value(request.getPending(), 0)
+            + " failed=" + value(request.getFailed(), 0);
+        saveDeviceEvent(deviceId, "FACE_LIBRARY_SYNC", value(request.getFailed(), 0) > 0 ? "WARN" : "INFO", "小脑人脸库同步确认", message);
+        return new DeviceControlResultDto(true, "FACE_LIBRARY_SYNC_ACK", message);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public AlertDto reportCerebellumFaceAlert(CerebellumFaceAlertRequestDto request) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            String deviceId = blankToDefault(request.getDeviceId(), DEVICE_ID);
+            String personId = blankToDefault(request.getPersonId(), "UNKNOWN");
+            String alertId = blankToDefault(request.getAlertId(), "FACE-" + deviceId + "-" + personId + "-" + UUID.randomUUID());
+            String displayName = blankToDefault(request.getDisplayName(), personId);
+            String riskLevel = blankToDefault(request.getRiskLevel(), "MEDIUM");
+            String level = "HIGH".equalsIgnoreCase(riskLevel) ? "HIGH" : "WARNING";
+            Double similarity = request.getAverageSimilarity();
+            String confidence = similarity == null ? "-" : Math.round(similarity * 100) + "%";
+
+            PatrolAlert alert = getOrCreateAlert(alertId);
+            alert.setTitle("重点人员疑似命中：" + displayName);
+            alert.setLevel(level);
+            alert.setStatus("PENDING");
+            alert.setOccurredAt(blankToDefault(request.getOccurredAt(), Date.from(Instant.now()).toString()));
+            alert.setLocationText(blankToDefault(request.getCameraId(), "边缘小脑实时流"));
+            alert.setSource(deviceId);
+            alert.setConfidence(confidence);
+            alert.setDescription("边缘小脑多帧确认候选，人员=" + displayName
+                + "，编号=" + personId
+                + "，类别=" + blankToDefault(request.getCategory(), "-")
+                + "，风险=" + riskLevel
+                + "，命中帧=" + value(request.getVoteCount(), 0) + "/" + value(request.getConfirmFrames(), 0)
+                + "，窗口=" + value(request.getWindowSeconds(), 0D) + "秒"
+                + "，流=" + blankToDefault(request.getStreamId(), "-")
+                + "，帧=" + blankToDefault(request.getFrameId(), "-")
+                + "。结果仅作疑似候选，需人工确认。");
+            alert.setDelFlag("0");
+            alertMapper.insertOrUpdate(alert);
+
+            saveDeviceEvent(deviceId, "FACE_ALERT", level, "重点人员疑似命中", alert.getDescription());
+            saveAlertDisposition(alertId, "CREATE", "PENDING", "边缘小脑上报疑似候选，等待人工确认", 0);
+            saveAudit("ALERT", "小脑上报重点人员疑似命中", alertId, "SUCCESS");
+            realtimePublisher.publish("ALERT_CREATED", "alerts", alert.getTitle(), alert.getDescription(), alertId,
+                realtimePublisher.payload("alertId", alertId, "deviceId", deviceId, "personId", personId, "status", alert.getStatus(), "level", level));
+            return toAlertDto(alert);
+        });
+    }
+
     private LoginUser buildLoginUser(SysUserVo user) {
         LoginUser loginUser = new LoginUser();
         loginUser.setTenantId(user.getTenantId());
@@ -859,6 +1096,44 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             }
         }
         return loginUser;
+    }
+
+    private FaceLibraryPersonDto toFaceLibraryPerson(PatrolControlPerson person) {
+        Date updatedAt = person.getFaceUpdatedAt() != null ? person.getFaceUpdatedAt() : person.getUpdateTime();
+        if (updatedAt == null) {
+            updatedAt = person.getCreateTime();
+        }
+        return new FaceLibraryPersonDto(
+            person.getControlId(),
+            person.getControlId(),
+            person.getName(),
+            person.getName(),
+            person.getCategory(),
+            person.getRiskLevel(),
+            person.getStatus(),
+            person.getSource(),
+            person.getExpiresAt(),
+            person.getFaceImageUrl(),
+            person.getFaceImageSha256(),
+            updatedAt
+        );
+    }
+
+    private String faceLibraryVersion(List<PatrolControlPerson> persons) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (PatrolControlPerson person : persons) {
+                Date updatedAt = person.getFaceUpdatedAt() != null ? person.getFaceUpdatedAt() : person.getUpdateTime();
+                String payload = blankToDefault(person.getControlId(), "")
+                    + "|" + blankToDefault(person.getStatus(), "")
+                    + "|" + blankToDefault(person.getFaceImageSha256(), "")
+                    + "|" + (updatedAt == null ? 0L : updatedAt.getTime());
+                digest.update(payload.getBytes(StandardCharsets.UTF_8));
+            }
+            return "face-lib-" + hex(digest.digest()).substring(0, 16);
+        } catch (NoSuchAlgorithmException e) {
+            throw new ServiceException("生成人脸库版本失败：" + e.getMessage());
+        }
     }
 
     private PatrolDevice getOrCreateDevice(String deviceId) {
@@ -1037,6 +1312,22 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         RedisUtils.setCacheObject("patrol:device:" + device.getDeviceId(), toDeviceStatus(device), Duration.ofMinutes(5));
     }
 
+    private void saveIntercomSession(IntercomSessionDto session) {
+        RedisUtils.setCacheObject(INTERCOM_SESSION_PREFIX + session.getSessionId(), session, INTERCOM_TTL);
+    }
+
+    private IntercomSessionDto intercomSession(String sessionId) {
+        return RedisUtils.getCacheObject(INTERCOM_SESSION_PREFIX + sessionId);
+    }
+
+    private IntercomSessionDto requireIntercomSession(String sessionId) {
+        IntercomSessionDto session = intercomSession(sessionId);
+        if (session == null) {
+            throw new ServiceException("对讲会话不存在或已过期：" + sessionId);
+        }
+        return session;
+    }
+
     private void saveCommand(String deviceId, DeviceCommandRequestDto request, String status, String resultMessage) {
         PatrolDeviceCommand command = new PatrolDeviceCommand();
         command.setTenantId(TENANT_ID);
@@ -1183,6 +1474,65 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         return targetId.equals(message.getTargetId());
     }
 
+    private PatrolMessageReceipt visibleReceipt(String messageId, String targetId) {
+        List<String> keys = new ArrayList<>();
+        String safeTargetId = blankToDefault(targetId, "");
+        String username = blankToDefault(LoginHelper.getUsername(), "");
+        String deviceId = currentBoundDeviceId();
+        if (!safeTargetId.isBlank()) {
+            keys.add(safeTargetId);
+        }
+        if (!username.isBlank() && !keys.contains(username)) {
+            keys.add(username);
+        }
+        if (!deviceId.isBlank() && !keys.contains(deviceId)) {
+            keys.add(deviceId);
+        }
+        return messageReceiptMapper.selectList(new LambdaQueryWrapper<PatrolMessageReceipt>()
+                .eq(PatrolMessageReceipt::getMessageId, messageId))
+            .stream()
+            .filter(item -> keys.contains(item.getRecipientId()) || keys.contains(item.getDeviceId()))
+            .findFirst()
+            .orElse(null);
+    }
+
+    private void markReceiptDelivered(PatrolMessageReceipt receipt) {
+        receipt.setLastPullAt(new Date());
+        if (!"READ".equals(receipt.getDeliveryStatus())) {
+            receipt.setDeliveryStatus("DELIVERED");
+            if (receipt.getDeliveredAt() == null) {
+                receipt.setDeliveredAt(new Date());
+            }
+        }
+        messageReceiptMapper.updateById(receipt);
+    }
+
+    private PatrolMessage syncMessageDeliverySummary(String messageId) {
+        PatrolMessage message = messageMapper.selectById(messageId);
+        if (message == null) {
+            return null;
+        }
+        List<PatrolMessageReceipt> receipts = messageReceiptMapper.selectList(new LambdaQueryWrapper<PatrolMessageReceipt>()
+            .eq(PatrolMessageReceipt::getMessageId, messageId));
+        if (receipts.isEmpty()) {
+            return message;
+        }
+        int total = receipts.size();
+        int read = Math.toIntExact(receipts.stream().filter(item -> "READ".equals(item.getDeliveryStatus())).count());
+        int delivered = Math.toIntExact(receipts.stream().filter(item -> "DELIVERED".equals(item.getDeliveryStatus()) || "READ".equals(item.getDeliveryStatus())).count());
+        message.setTotalCount(total);
+        message.setReadCount(read);
+        if (read >= total) {
+            message.setStatus("READ");
+        } else if (delivered >= total) {
+            message.setStatus("DELIVERED");
+        } else {
+            message.setStatus("SENT");
+        }
+        messageMapper.updateById(message);
+        return message;
+    }
+
     private PatrolDeviceBinding activeBinding(String deviceId) {
         if (deviceId == null || deviceId.isBlank()) {
             return null;
@@ -1287,12 +1637,15 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         return new SosEventDto(event.getSosId(), event.getPhase(), event.getMessage(), location, Boolean.TRUE.equals(event.getRecordingAudio()), event.getBackupEtaMinutes());
     }
 
-    private PatrolMessageDto toMessageDto(PatrolMessage message) {
+    private PatrolMessageDto toMessageDto(PatrolMessage message, PatrolMessageReceipt receipt) {
         return new PatrolMessageDto(
             message.getMessageId(),
             message.getTitle(),
             message.getContent(),
             message.getTargetType(),
+            receipt == null ? message.getStatus() : receipt.getDeliveryStatus(),
+            receipt == null || receipt.getDeliveredAt() == null ? "" : receipt.getDeliveredAt().toString(),
+            receipt == null || receipt.getReadAt() == null ? "" : receipt.getReadAt().toString(),
             message.getStatus(),
             message.getSentAt() == null ? "" : message.getSentAt().toString()
         );
@@ -1321,7 +1674,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         if (type.startsWith("image/") || lower.matches(".*\\.(jpg|jpeg|png|webp|bmp)$")) {
             return "PHOTO";
         }
-        if (type.startsWith("audio/") || lower.matches(".*\\.(mp3|wav|aac|m4a|amr)$")) {
+        if (type.startsWith("audio/") || lower.matches(".*\\.(mp3|wav|aac|m4a|amr|opus)$")) {
             return "AUDIO";
         }
         return "VIDEO";
@@ -1530,6 +1883,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     private float value(Float value, float defaultValue) {
+        return value == null ? defaultValue : value;
+    }
+
+    private double value(Double value, double defaultValue) {
         return value == null ? defaultValue : value;
     }
 }

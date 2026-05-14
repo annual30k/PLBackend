@@ -236,6 +236,31 @@ create table if not exists patrol_sos_event (
     key idx_patrol_sos_tenant_phase (tenant_id, phase)
 ) engine=innodb default charset=utf8mb4 comment='SOS事件表';
 
+create table if not exists patrol_sos_disposition (
+    disposition_id       varchar(64)   not null comment '流水ID',
+    tenant_id            varchar(20)   default '000000' comment '租户编号',
+    sos_id               varchar(64)   not null comment 'SOS ID',
+    action_type          varchar(64)   not null comment '动作类型',
+    action_result        varchar(64)   default null comment '处置结果',
+    operator_id          varchar(64)   default null comment '操作人ID',
+    operator_name        varchar(120)  default null comment '操作人姓名',
+    note                 varchar(500)  default null comment '处置说明',
+    contact_name         varchar(120)  default null comment '通知联系人',
+    contact_phone        varchar(64)   default null comment '联系电话',
+    attachment_file_id   varchar(64)   default null comment '附件文件ID',
+    attachment_file_name varchar(255)  default null comment '附件文件名',
+    backup_eta_minutes   int           default null comment '增援ETA',
+    occurred_at          datetime      default null comment '发生时间',
+    create_dept          bigint(20)    default null comment '创建部门',
+    create_by            bigint(20)    default null comment '创建者',
+    create_time          datetime      default null comment '创建时间',
+    update_by            bigint(20)    default null comment '更新者',
+    update_time          datetime      default null comment '更新时间',
+    del_flag             char(1)       default '0' comment '删除标志',
+    primary key (disposition_id),
+    key idx_patrol_sos_disposition_sos (tenant_id, sos_id, occurred_at)
+) engine=innodb default charset=utf8mb4 comment='SOS处置流水表';
+
 create table if not exists patrol_location_track (
     track_id        varchar(64)   not null comment '轨迹ID',
     tenant_id       varchar(20)   default '000000' comment '租户编号',
@@ -349,6 +374,29 @@ create table if not exists patrol_message (
     key idx_patrol_message_time (tenant_id, sent_at)
 ) engine=innodb default charset=utf8mb4 comment='指挥消息表';
 
+create table if not exists patrol_message_receipt (
+    receipt_id      varchar(64)  not null comment '接收明细ID',
+    tenant_id       varchar(20)  default '000000' comment '租户编号',
+    message_id      varchar(64)  not null comment '消息ID',
+    recipient_id    varchar(64)  not null comment '接收人警号或目标标识',
+    recipient_name  varchar(120) default null comment '接收人名称',
+    device_id       varchar(64)  default null comment '绑定设备ID',
+    delivery_status varchar(32)  not null comment '投递状态',
+    delivered_at    datetime     default null comment '投递时间',
+    read_at         datetime     default null comment '已读时间',
+    last_pull_at    datetime     default null comment '最近拉取时间',
+    create_dept     bigint(20)   default null comment '创建部门',
+    create_by       bigint(20)   default null comment '创建者',
+    create_time     datetime     default null comment '创建时间',
+    update_by       bigint(20)   default null comment '更新者',
+    update_time     datetime     default null comment '更新时间',
+    del_flag        char(1)      default '0' comment '删除标志',
+    primary key (receipt_id),
+    unique key uk_patrol_message_receipt_user (tenant_id, message_id, recipient_id),
+    key idx_patrol_message_receipt_message (tenant_id, message_id),
+    key idx_patrol_message_receipt_target (tenant_id, recipient_id, device_id, delivery_status)
+) engine=innodb default charset=utf8mb4 comment='指挥消息接收明细表';
+
 create table if not exists patrol_audit_log (
     log_id        varchar(64)  not null comment '日志ID',
     tenant_id     varchar(20)  default '000000' comment '租户编号',
@@ -382,6 +430,9 @@ create table if not exists patrol_control_person (
     source      varchar(120) default null comment '数据来源',
     expires_at  datetime     default null comment '到期时间',
     remark      varchar(500) default null comment '备注',
+    face_image_url    varchar(500) default null comment '人脸底库图片地址',
+    face_image_sha256 varchar(64)  default null comment '人脸底库图片SHA-256',
+    face_updated_at   datetime     default null comment '人脸底库更新时间',
     create_dept bigint(20)   default null comment '创建部门',
     create_by   bigint(20)   default null comment '创建者',
     create_time datetime     default null comment '创建时间',
@@ -544,8 +595,14 @@ values
 insert ignore into patrol_message(message_id, tenant_id, title, content, target_type, target_id, target_name, channel, status, read_count, total_count, sent_at, create_dept, create_by, create_time, del_flag)
 values
 ('MSG-001', '000000', '现场支援', '请前往温泉公园北侧入口支援未识别车辆复核。', 'SINGLE', 'POLICE_9527', '张警官', 'APP', 'READ', 1, 1, date_sub(sysdate(), interval 30 minute), 103, 1, sysdate(), '0'),
-('MSG-002', '000000', '重点预警升级', '重点人员预警升级，注意联动盘查并上传现场照片。', 'ORG', 'TEAM-A-42', '巡逻组 A-42', 'APP', 'SENT', 0, 4, date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
+('MSG-002', '000000', '重点预警升级', '重点人员预警升级，注意联动盘查并上传现场照片。', 'ORG', 'TEAM-A-42', '巡逻组 A-42', 'APP', 'SENT', 0, 1, date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
 ('MSG-003', '000000', '设备电量提醒', '设备低电量，请更换备用设备并保持心跳在线。', 'DEVICE', 'HEADSET_001', 'ForceLink-H1', 'APP', 'SENT', 0, 1, date_sub(sysdate(), interval 9 minute), 103, 1, sysdate(), '0');
+
+insert ignore into patrol_message_receipt(receipt_id, tenant_id, message_id, recipient_id, recipient_name, device_id, delivery_status, delivered_at, read_at, last_pull_at, create_dept, create_by, create_time, del_flag)
+values
+('MR-001', '000000', 'MSG-001', 'POLICE_9527', '张警官', 'HEADSET_001', 'READ', date_sub(sysdate(), interval 29 minute), date_sub(sysdate(), interval 28 minute), date_sub(sysdate(), interval 29 minute), 103, 1, sysdate(), '0'),
+('MR-002', '000000', 'MSG-002', 'POLICE_9527', '张警官', 'HEADSET_001', 'PENDING', null, null, null, 103, 1, sysdate(), '0'),
+('MR-003', '000000', 'MSG-003', 'POLICE_9527', '张警官', 'HEADSET_001', 'PENDING', null, null, null, 103, 1, sysdate(), '0');
 
 insert ignore into patrol_control_person(control_id, tenant_id, name, category, id_card_no, risk_level, status, source, expires_at, remark, create_dept, create_by, create_time, del_flag)
 values

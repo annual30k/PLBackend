@@ -33,6 +33,21 @@ public class PatrolMessageDto {
     private String targetType;
 
     /**
+     * 当前接收人投递状态
+     */
+    private String deliveryStatus;
+
+    /**
+     * 当前接收人投递时间
+     */
+    private String deliveredAt;
+
+    /**
+     * 当前接收人已读时间
+     */
+    private String readAt;
+
+    /**
      * 消息状态
      */
     private String status;

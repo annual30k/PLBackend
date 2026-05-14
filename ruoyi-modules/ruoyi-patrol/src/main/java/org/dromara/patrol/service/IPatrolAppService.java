@@ -3,15 +3,22 @@ package org.dromara.patrol.service;
 import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.AuthSessionDto;
+import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
 import org.dromara.patrol.entity.DeviceControlResultDto;
 import org.dromara.patrol.entity.DeviceStatusDto;
 import org.dromara.patrol.entity.DeviceWifiStateDto;
+import org.dromara.patrol.entity.FaceLibraryAckRequestDto;
+import org.dromara.patrol.entity.FaceLibraryPackageDto;
 import org.dromara.patrol.entity.GpsLocationDto;
 import org.dromara.patrol.entity.HeartbeatAckDto;
 import org.dromara.patrol.entity.HeartbeatRequestDto;
+import org.dromara.patrol.entity.IntercomSessionDto;
+import org.dromara.patrol.entity.IntercomSessionRequestDto;
+import org.dromara.patrol.entity.IntercomSignalDto;
+import org.dromara.patrol.entity.IntercomSignalRequestDto;
 import org.dromara.patrol.entity.LoginRequestDto;
 import org.dromara.patrol.entity.MediaFileDto;
 import org.dromara.patrol.entity.MediaUploadTaskCreateDto;
@@ -104,6 +111,18 @@ public interface IPatrolAppService {
 
     StreamRelayStateDto stopStream();
 
+    IntercomSessionDto createIntercomSession(IntercomSessionRequestDto request);
+
+    IntercomSessionDto pendingIntercomSession(String deviceId);
+
+    IntercomSessionDto acceptIntercomSession(String sessionId);
+
+    IntercomSessionDto closeIntercomSession(String sessionId);
+
+    IntercomSignalDto sendIntercomSignal(String sessionId, IntercomSignalRequestDto request);
+
+    List<IntercomSignalDto> intercomSignals(String sessionId, String afterSignalId);
+
     PatrolAreaDto currentPatrolArea();
 
     SosEventDto activateSos(GpsLocationDto location);
@@ -111,4 +130,10 @@ public interface IPatrolAppService {
     SosEventDto cancelSos();
 
     VersionCheckDto checkVersion(int currentVersionCode);
+
+    FaceLibraryPackageDto faceLibraryPackage(String deviceId, String currentVersion, boolean force);
+
+    DeviceControlResultDto acknowledgeFaceLibrary(FaceLibraryAckRequestDto request);
+
+    AlertDto reportCerebellumFaceAlert(CerebellumFaceAlertRequestDto request);
 }

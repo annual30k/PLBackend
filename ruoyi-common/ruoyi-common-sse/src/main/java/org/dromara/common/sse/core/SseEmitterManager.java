@@ -155,6 +155,15 @@ public class SseEmitterManager {
     }
 
     /**
+     * 当前 JVM 内活跃 SSE 连接数。
+     */
+    public int activeConnectionCount() {
+        return USER_TOKEN_EMITTERS.values().stream()
+            .mapToInt(Map::size)
+            .sum();
+    }
+
+    /**
      * 订阅SSE消息主题，并提供一个消费者函数来处理接收到的消息
      *
      * @param consumer 处理SSE消息的消费者函数

@@ -6,15 +6,22 @@ import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.ApiEnvelope;
 import org.dromara.patrol.entity.AuthSessionDto;
+import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
 import org.dromara.patrol.entity.DeviceControlResultDto;
 import org.dromara.patrol.entity.DeviceStatusDto;
 import org.dromara.patrol.entity.DeviceWifiStateDto;
+import org.dromara.patrol.entity.FaceLibraryAckRequestDto;
+import org.dromara.patrol.entity.FaceLibraryPackageDto;
 import org.dromara.patrol.entity.GpsLocationDto;
 import org.dromara.patrol.entity.HeartbeatAckDto;
 import org.dromara.patrol.entity.HeartbeatRequestDto;
+import org.dromara.patrol.entity.IntercomSessionDto;
+import org.dromara.patrol.entity.IntercomSessionRequestDto;
+import org.dromara.patrol.entity.IntercomSignalDto;
+import org.dromara.patrol.entity.IntercomSignalRequestDto;
 import org.dromara.patrol.entity.LoginRequestDto;
 import org.dromara.patrol.entity.MediaFileDto;
 import org.dromara.patrol.entity.MediaUploadTaskCreateDto;
@@ -241,6 +248,36 @@ public class PatrolAppApiController {
         return ok(patrolAppService.stopStream());
     }
 
+    @PostMapping("/intercom/sessions")
+    public ApiEnvelope<IntercomSessionDto> createIntercomSession(@RequestBody IntercomSessionRequestDto request) {
+        return ok(patrolAppService.createIntercomSession(request));
+    }
+
+    @GetMapping("/intercom/sessions/pending")
+    public ApiEnvelope<IntercomSessionDto> pendingIntercomSession(@RequestParam String deviceId) {
+        return ok(patrolAppService.pendingIntercomSession(deviceId));
+    }
+
+    @PostMapping("/intercom/sessions/{sessionId}/accept")
+    public ApiEnvelope<IntercomSessionDto> acceptIntercomSession(@PathVariable String sessionId) {
+        return ok(patrolAppService.acceptIntercomSession(sessionId));
+    }
+
+    @PostMapping("/intercom/sessions/{sessionId}/close")
+    public ApiEnvelope<IntercomSessionDto> closeIntercomSession(@PathVariable String sessionId) {
+        return ok(patrolAppService.closeIntercomSession(sessionId));
+    }
+
+    @PostMapping("/intercom/sessions/{sessionId}/signals")
+    public ApiEnvelope<IntercomSignalDto> sendIntercomSignal(@PathVariable String sessionId, @RequestBody IntercomSignalRequestDto request) {
+        return ok(patrolAppService.sendIntercomSignal(sessionId, request));
+    }
+
+    @GetMapping("/intercom/sessions/{sessionId}/signals")
+    public ApiEnvelope<List<IntercomSignalDto>> intercomSignals(@PathVariable String sessionId, @RequestParam(defaultValue = "") String afterSignalId) {
+        return ok(patrolAppService.intercomSignals(sessionId, afterSignalId));
+    }
+
     @GetMapping("/patrol/areas/current")
     public ApiEnvelope<PatrolAreaDto> currentPatrolArea() {
         return ok(patrolAppService.currentPatrolArea());
@@ -259,6 +296,27 @@ public class PatrolAppApiController {
     @GetMapping("/version/check")
     public ApiEnvelope<VersionCheckDto> checkVersion(@RequestParam(defaultValue = "1") int currentVersionCode) {
         return ok(patrolAppService.checkVersion(currentVersionCode));
+    }
+
+    @SaIgnore
+    @GetMapping("/cerebellum/face-library")
+    public ApiEnvelope<FaceLibraryPackageDto> faceLibraryPackage(
+        @RequestParam(required = false) String deviceId,
+        @RequestParam(required = false) String currentVersion,
+        @RequestParam(defaultValue = "false") boolean force) {
+        return ok(patrolAppService.faceLibraryPackage(deviceId, currentVersion, force));
+    }
+
+    @SaIgnore
+    @PostMapping("/cerebellum/face-library/ack")
+    public ApiEnvelope<DeviceControlResultDto> acknowledgeFaceLibrary(@RequestBody FaceLibraryAckRequestDto request) {
+        return ok(patrolAppService.acknowledgeFaceLibrary(request));
+    }
+
+    @SaIgnore
+    @PostMapping("/cerebellum/face-alerts")
+    public ApiEnvelope<AlertDto> reportCerebellumFaceAlert(@RequestBody CerebellumFaceAlertRequestDto request) {
+        return ok(patrolAppService.reportCerebellumFaceAlert(request));
     }
 
     private <T> ApiEnvelope<T> ok(T data) {

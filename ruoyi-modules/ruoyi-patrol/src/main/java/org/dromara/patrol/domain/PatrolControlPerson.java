@@ -68,6 +68,21 @@ public class PatrolControlPerson extends TenantEntity {
     private String remark;
 
     /**
+     * 人脸底库图片地址
+     */
+    private String faceImageUrl;
+
+    /**
+     * 人脸底库图片SHA-256
+     */
+    private String faceImageSha256;
+
+    /**
+     * 人脸底库更新时间
+     */
+    private Date faceUpdatedAt;
+
+    /**
      * 删除标志（0代表存在 1代表删除）
      */
     @TableLogic
