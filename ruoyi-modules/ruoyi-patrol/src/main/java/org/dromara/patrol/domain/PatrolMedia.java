@@ -52,6 +52,16 @@ public class PatrolMedia extends TenantEntity {
     private String sizeText;
 
     /**
+     * 文件大小（字节）
+     */
+    private Long fileSizeBytes;
+
+    /**
+     * MIME类型
+     */
+    private String mimeType;
+
+    /**
      * 时长文本
      */
     private String durationText;
@@ -100,6 +110,41 @@ public class PatrolMedia extends TenantEntity {
      * SHA256哈希值
      */
     private String sha256;
+
+    /**
+     * 证据水印令牌
+     */
+    private String watermarkToken;
+
+    /**
+     * 警号
+     */
+    private String badgeNo;
+
+    /**
+     * 警员姓名
+     */
+    private String officerName;
+
+    /**
+     * 设备ID
+     */
+    private String deviceId;
+
+    /**
+     * 业务类型
+     */
+    private String bizType;
+
+    /**
+     * 业务ID
+     */
+    private String bizId;
+
+    /**
+     * 证据来源
+     */
+    private String evidenceSource;
 
     /**
      * 删除标志（0代表存在 1代表删除）

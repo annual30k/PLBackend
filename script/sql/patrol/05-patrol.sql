@@ -75,6 +75,27 @@ create table if not exists patrol_alert_attachment (
     key idx_patrol_alert_attachment_alert (tenant_id, alert_id)
 ) engine=innodb default charset=utf8mb4 comment='预警处置附件表';
 
+create table if not exists patrol_alert_disposition (
+    disposition_id    varchar(64)   not null comment '处置流水ID',
+    tenant_id         varchar(20)   default '000000' comment '租户编号',
+    alert_id          varchar(64)   not null comment '告警ID',
+    action_type       varchar(32)   not null comment '动作类型',
+    action_result     varchar(64)   default null comment '动作结果',
+    operator_id       varchar(64)   default null comment '操作人ID',
+    operator_name     varchar(64)   default null comment '操作人名称',
+    note              varchar(1000) default null comment '处置说明',
+    attachments_count int           default 0 comment '附件数量',
+    occurred_at       datetime      default null comment '发生时间',
+    create_dept       bigint(20)    default null comment '创建部门',
+    create_by         bigint(20)    default null comment '创建者',
+    create_time       datetime      default null comment '创建时间',
+    update_by         bigint(20)    default null comment '更新者',
+    update_time       datetime      default null comment '更新时间',
+    del_flag          char(1)       default '0' comment '删除标志',
+    primary key (disposition_id),
+    key idx_patrol_alert_disposition_alert (tenant_id, alert_id, occurred_at)
+) engine=innodb default charset=utf8mb4 comment='预警处置流水表';
+
 create table if not exists patrol_media (
     media_id          bigint(20)    not null comment '媒体主键',
     tenant_id         varchar(20)   default '000000' comment '租户编号',
@@ -83,6 +104,8 @@ create table if not exists patrol_media (
     media_type        varchar(32)   not null comment '媒体类型',
     captured_at       varchar(32)   default null comment '采集时间',
     size_text         varchar(32)   default null comment '大小描述',
+    file_size_bytes   bigint(20)    default null comment '文件大小字节',
+    mime_type         varchar(128)  default null comment 'MIME类型',
     duration_text     varchar(32)   default null comment '时长描述',
     sha256_verified   tinyint(1)    default 0 comment '校验结果',
     storage_side      varchar(32)   not null comment '存储侧',
@@ -93,6 +116,13 @@ create table if not exists patrol_media (
     bucket_name       varchar(100)  default null comment '对象桶',
     object_key        varchar(500)  default null comment '对象Key',
     sha256            varchar(128)  default null comment 'SHA256',
+    watermark_token   varchar(128)  default null comment '证据水印令牌',
+    badge_no          varchar(64)   default null comment '警号',
+    officer_name      varchar(120)  default null comment '警员姓名',
+    device_id         varchar(64)   default null comment '设备ID',
+    biz_type          varchar(64)   default null comment '业务类型',
+    biz_id            varchar(64)   default null comment '业务ID',
+    evidence_source   varchar(64)   default null comment '证据来源',
     create_dept       bigint(20)    default null comment '创建部门',
     create_by         bigint(20)    default null comment '创建者',
     create_time       datetime      default null comment '创建时间',
@@ -103,6 +133,70 @@ create table if not exists patrol_media (
     unique key uk_patrol_media_file_side (tenant_id, file_id, storage_side),
     key idx_patrol_media_tenant_side (tenant_id, storage_side)
 ) engine=innodb default charset=utf8mb4 comment='巡检媒体证据表';
+
+create table if not exists patrol_media_upload_task (
+    task_id           varchar(64)   not null comment '上传任务ID',
+    tenant_id         varchar(20)   default '000000' comment '租户编号',
+    file_id           varchar(64)   default null comment '合并后媒体文件ID',
+    file_name         varchar(255)  not null comment '原始文件名',
+    media_type        varchar(32)   default null comment '媒体类型',
+    mime_type         varchar(128)  default null comment 'MIME类型',
+    file_size_bytes   bigint(20)    default 0 comment '文件总大小字节',
+    chunk_size_bytes  bigint(20)    default 0 comment '分片大小字节',
+    total_chunks      int           default 0 comment '分片总数',
+    uploaded_chunks   int           default 0 comment '已上传分片数',
+    uploaded_bytes    bigint(20)    default 0 comment '已上传字节数',
+    expected_sha256   varchar(128)  default null comment '端侧声明SHA256',
+    actual_sha256     varchar(128)  default null comment '服务端实际SHA256',
+    storage_side      varchar(32)   default 'PHONE' comment '存储侧',
+    biz_type          varchar(64)   default null comment '业务类型',
+    biz_id            varchar(64)   default null comment '业务ID',
+    status            varchar(32)   default 'INIT' comment '任务状态',
+    progress          decimal(5,4)  default 0 comment '上传进度',
+    temp_dir          varchar(512)  default null comment '临时分片目录',
+    error_message     varchar(500)  default null comment '失败原因',
+    badge_no          varchar(64)   default null comment '警号',
+    officer_name      varchar(120)  default null comment '警员姓名',
+    device_id         varchar(64)   default null comment '设备ID',
+    completed_at      datetime      default null comment '完成时间',
+    create_dept       bigint(20)    default null comment '创建部门',
+    create_by         bigint(20)    default null comment '创建者',
+    create_time       datetime      default null comment '创建时间',
+    update_by         bigint(20)    default null comment '更新者',
+    update_time       datetime      default null comment '更新时间',
+    del_flag          char(1)       default '0' comment '删除标志',
+    primary key (task_id),
+    key idx_patrol_upload_task_status (tenant_id, status),
+    key idx_patrol_upload_task_file (tenant_id, file_id)
+) engine=innodb default charset=utf8mb4 comment='巡检媒体分片上传任务表';
+
+drop procedure if exists add_patrol_column_if_absent;
+delimiter //
+create procedure add_patrol_column_if_absent(in p_table varchar(64), in p_column varchar(64), in p_definition text)
+begin
+    if not exists (
+        select 1 from information_schema.columns
+        where table_schema = database()
+          and table_name = p_table
+          and column_name = p_column
+    ) then
+        set @ddl = concat('alter table ', p_table, ' add column ', p_column, ' ', p_definition);
+        prepare stmt from @ddl;
+        execute stmt;
+        deallocate prepare stmt;
+    end if;
+end//
+delimiter ;
+call add_patrol_column_if_absent('patrol_media', 'file_size_bytes', 'bigint(20) default null comment ''文件大小字节''');
+call add_patrol_column_if_absent('patrol_media', 'mime_type', 'varchar(128) default null comment ''MIME类型''');
+call add_patrol_column_if_absent('patrol_media', 'watermark_token', 'varchar(128) default null comment ''证据水印令牌''');
+call add_patrol_column_if_absent('patrol_media', 'badge_no', 'varchar(64) default null comment ''警号''');
+call add_patrol_column_if_absent('patrol_media', 'officer_name', 'varchar(120) default null comment ''警员姓名''');
+call add_patrol_column_if_absent('patrol_media', 'device_id', 'varchar(64) default null comment ''设备ID''');
+call add_patrol_column_if_absent('patrol_media', 'biz_type', 'varchar(64) default null comment ''业务类型''');
+call add_patrol_column_if_absent('patrol_media', 'biz_id', 'varchar(64) default null comment ''业务ID''');
+call add_patrol_column_if_absent('patrol_media', 'evidence_source', 'varchar(64) default null comment ''证据来源''');
+drop procedure if exists add_patrol_column_if_absent;
 
 create table if not exists patrol_area (
     area_id       varchar(64)   not null comment '巡区ID',
@@ -206,6 +300,31 @@ create table if not exists patrol_device_event (
     key idx_patrol_device_event_type (tenant_id, event_type)
 ) engine=innodb default charset=utf8mb4 comment='设备事件日志表';
 
+create table if not exists patrol_device_binding (
+    binding_id  varchar(64)  not null comment '绑定ID',
+    tenant_id   varchar(20)  default '000000' comment '租户编号',
+    device_id   varchar(64)  not null comment '设备ID',
+    user_id     bigint(20)   default null comment '警员用户ID',
+    user_name   varchar(64)  default null comment '登录账号/警号',
+    nick_name   varchar(64)  default null comment '警员姓名',
+    dept_id     bigint(20)   default null comment '所属部门ID',
+    dept_name   varchar(120) default null comment '所属部门名称',
+    badge_no    varchar(64)  default null comment '警号',
+    bind_status varchar(32)  not null comment '绑定状态',
+    bound_at    datetime     default null comment '绑定时间',
+    unbound_at  datetime     default null comment '解绑时间',
+    remark      varchar(500) default null comment '备注',
+    create_dept bigint(20)   default null comment '创建部门',
+    create_by   bigint(20)   default null comment '创建者',
+    create_time datetime     default null comment '创建时间',
+    update_by   bigint(20)   default null comment '更新者',
+    update_time datetime     default null comment '更新时间',
+    del_flag    char(1)      default '0' comment '删除标志',
+    primary key (binding_id),
+    key idx_patrol_device_binding_device (tenant_id, device_id, bind_status),
+    key idx_patrol_device_binding_user (tenant_id, user_name, bind_status)
+) engine=innodb default charset=utf8mb4 comment='设备警员绑定表';
+
 create table if not exists patrol_message (
     message_id  varchar(64)   not null comment '消息ID',
     tenant_id   varchar(20)   default '000000' comment '租户编号',
@@ -296,6 +415,63 @@ create table if not exists patrol_control_vehicle (
     key idx_patrol_control_vehicle_plate (tenant_id, plate_no)
 ) engine=innodb default charset=utf8mb4 comment='车辆布控表';
 
+create table if not exists patrol_device_config (
+    config_id                  varchar(64)  not null comment '配置ID',
+    tenant_id                  varchar(20)  default '000000' comment '租户编号',
+    device_id                  varchar(64)  not null comment '设备ID',
+    supports_glasses           tinyint(1)   default 0 comment '是否支持眼镜能力',
+    supports_earphone          tinyint(1)   default 0 comment '是否支持耳机能力',
+    supports_wifi              tinyint(1)   default 0 comment '是否支持Wi-Fi',
+    supports_file_transfer     tinyint(1)   default 0 comment '是否支持文件传输',
+    supports_photo             tinyint(1)   default 0 comment '是否支持拍照',
+    supports_video             tinyint(1)   default 0 comment '是否支持视频',
+    supports_audio_record      tinyint(1)   default 0 comment '是否支持录音',
+    supports_realtime_audio    tinyint(1)   default 0 comment '是否支持实时音频',
+    wifi_enabled               tinyint(1)   default 0 comment 'Wi-Fi是否启用',
+    wifi_ssid                  varchar(128) default null comment 'Wi-Fi SSID',
+    wifi_password_configured   tinyint(1)   default 0 comment '是否已配置Wi-Fi密码',
+    wifi_connected             tinyint(1)   default 0 comment 'Wi-Fi是否已连接',
+    video_width                int          default 240 comment '视频宽度',
+    video_height               int          default 0 comment '视频高度',
+    video_frame_rate           int          default 16 comment '视频帧率',
+    recording_duration_seconds int          default 86400 comment '录制时长秒数',
+    vertical_recording         tinyint(1)   default 1 comment '是否竖屏录制',
+    enhanced_sound             tinyint(1)   default 1 comment '是否增强音效',
+    brightness_level           int          default 2 comment '亮度档位',
+    realtime_audio_syncing     tinyint(1)   default 0 comment '实时音频同步状态',
+    last_media_sync_at         datetime     default null comment '最近媒体同步完成时间',
+    create_dept                bigint(20)   default null comment '创建部门',
+    create_by                  bigint(20)   default null comment '创建者',
+    create_time                datetime     default null comment '创建时间',
+    update_by                  bigint(20)   default null comment '更新者',
+    update_time                datetime     default null comment '更新时间',
+    del_flag                   char(1)      default '0' comment '删除标志',
+    primary key (config_id),
+    unique key uk_patrol_device_config_device (tenant_id, device_id)
+) engine=innodb default charset=utf8mb4 comment='设备能力与高级配置表';
+
+create table if not exists patrol_app_version (
+    version_id   varchar(64)  not null comment '版本ID',
+    tenant_id    varchar(20)  default '000000' comment '租户编号',
+    version_code int          not null comment '版本号编码',
+    version_name varchar(64)  not null comment '版本名称',
+    force_update tinyint(1)   default 0 comment '是否强制更新',
+    changelog    text         default null comment '更新日志',
+    download_url varchar(500) default null comment '下载地址',
+    sha256       varchar(128) default null comment '安装包SHA-256',
+    file_id      varchar(64)  default null comment '关联文件ID',
+    status       varchar(32)  not null comment '状态',
+    published_at datetime     default null comment '发布时间',
+    create_dept  bigint(20)   default null comment '创建部门',
+    create_by    bigint(20)   default null comment '创建者',
+    create_time  datetime     default null comment '创建时间',
+    update_by    bigint(20)   default null comment '更新者',
+    update_time  datetime     default null comment '更新时间',
+    del_flag     char(1)      default '0' comment '删除标志',
+    primary key (version_id),
+    key idx_patrol_app_version_status (tenant_id, status, version_code)
+) engine=innodb default charset=utf8mb4 comment='App版本表';
+
 insert ignore into sys_user values(9527, '000000', 103, 'POLICE_9527', '张警官', 'sys_user', 'zhang.police@city.gov.cn', '13800009527', '0', null, '$2a$10$X7Dwu6JiORKduaP8iS9sOOgUk/w93X63gAg2XAGGAXRs0KbiaNSki', '0', '0', '127.0.0.1', sysdate(), 103, 1, sysdate(), null, null, '移动端巡逻警员');
 insert ignore into sys_user_role values ('9527', '3');
 insert ignore into sys_user_post values ('9527', '4');
@@ -307,6 +483,20 @@ values
 ('SENSOR_S9', '000000', 'ForceLink-S9', 'SENSOR', '0000-pl2-ble-control', '1E:BD:55:0A:44:71', 0, 0, 65, 2, '00:00:00', 2.4, 16, 'v1.1.1', 'IDLE', 0, 0, 26.1015500, 119.3090000, '核心商务区 CBD-North', null, 103, 1, sysdate(), '0'),
 ('GLASSES_G1', '000000', 'ForceLink-G1', 'GLASSES', '0000-pl2-ble-control', '6B:13:9E:41:D7:50', 0, 0, 91, 4, '00:00:00', 24.8, 128, 'v1.3.0', 'IDLE', 0, 0, 26.1025500, 119.3079500, '北侧周界入口', null, 103, 1, sysdate(), '0');
 
+insert ignore into patrol_device_config(config_id, tenant_id, device_id, supports_glasses, supports_earphone, supports_wifi, supports_file_transfer, supports_photo, supports_video, supports_audio_record, supports_realtime_audio, wifi_enabled, wifi_ssid, wifi_password_configured, wifi_connected, video_width, video_height, video_frame_rate, recording_duration_seconds, vertical_recording, enhanced_sound, brightness_level, realtime_audio_syncing, create_dept, create_by, create_time, del_flag)
+values
+('CFG-HEADSET-001', '000000', 'HEADSET_001', 0, 1, 0, 1, 1, 1, 1, 1, 0, '', 0, 0, 240, 0, 16, 86400, 1, 1, 2, 0, 103, 1, sysdate(), '0'),
+('CFG-GLASSES-001', '000000', 'GLASSES_G1', 1, 0, 1, 1, 1, 1, 0, 0, 1, 'PatrolLink-Device', 0, 1, 240, 0, 16, 86400, 1, 1, 2, 0, 103, 1, sysdate(), '0');
+
+insert ignore into patrol_app_version(version_id, tenant_id, version_code, version_name, force_update, changelog, download_url, sha256, file_id, status, published_at, create_dept, create_by, create_time, del_flag)
+values
+('VER-ANDROID-125', '000000', 2, '1.2.5', 0, '对接平台端媒体上传\n对接设备高级能力与版本检查\n优化巡检消息与告警闭环', 'https://example.test/patrollink/PatrolLink-1.2.5.apk', null, null, 'PUBLISHED', sysdate(), 103, 1, sysdate(), '0');
+
+insert ignore into patrol_device_binding(binding_id, tenant_id, device_id, user_id, user_name, nick_name, dept_id, dept_name, badge_no, bind_status, bound_at, remark, create_dept, create_by, create_time, del_flag)
+values
+('BIND-SEED-001', '000000', 'HEADSET_001', 9527, 'POLICE_9527', '张警官', 103, '巡逻组 A-42', 'POLICE_9527', 'BOUND', sysdate(), '初始化绑定', 103, 1, sysdate(), '0');
+update patrol_device_binding set dept_name = '巡逻组 A-42' where binding_id = 'BIND-SEED-001';
+
 insert ignore into patrol_alert(alert_id, tenant_id, title, level, status, occurred_at, location_text, source, description, confidence, create_dept, create_by, create_time, del_flag)
 values
 ('AL-99824-03', '000000', '非法侵入监测', 'CRITICAL', 'PENDING', '14:32', '西三区 4号围墙 节点B', 'CAM-042', '围墙节点 B 检测到人员越界，耳机端已同步 12 秒现场视频片段。', '98.4%', 103, 1, sysdate(), '0'),
@@ -316,6 +506,10 @@ values
 insert ignore into patrol_alert_attachment(attachment_id, tenant_id, alert_id, client_file_id, file_name, mime_type, size_bytes, source, local_uri, upload_intent, create_dept, create_by, create_time, del_flag)
 values
 ('ATT-SEED-001', '000000', 'AL-99821-11', 'AUD-318', '现场确认录音.m4a', 'audio/mp4', 9017753, 'AUDIO', 'device://AUD-318', 'ALERT_CLOSE', 103, 1, sysdate(), '0');
+
+insert ignore into patrol_alert_disposition(disposition_id, tenant_id, alert_id, action_type, action_result, operator_id, operator_name, note, attachments_count, occurred_at, create_dept, create_by, create_time, del_flag)
+values
+('AD-SEED-001', '000000', 'AL-99821-11', 'CLOSE', 'RESOLVED', 'admin', 'admin', '现场确认无风险，已闭环。', 1, date_sub(sysdate(), interval 1 hour), 103, 1, sysdate(), '0');
 
 insert ignore into patrol_media(media_id, tenant_id, file_id, file_name, media_type, captured_at, size_text, duration_text, sha256_verified, storage_side, transfer_status, progress, bucket_name, object_key, create_dept, create_by, create_time, del_flag)
 values

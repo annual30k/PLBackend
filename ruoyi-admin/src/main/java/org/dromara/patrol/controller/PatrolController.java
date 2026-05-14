@@ -6,28 +6,37 @@ import org.dromara.common.core.domain.R;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.patrol.domain.PatrolAlert;
 import org.dromara.patrol.domain.PatrolAlertAttachment;
+import org.dromara.patrol.domain.PatrolAlertDisposition;
+import org.dromara.patrol.domain.PatrolAppVersion;
 import org.dromara.patrol.domain.PatrolAuditLog;
 import org.dromara.patrol.domain.PatrolControlPerson;
 import org.dromara.patrol.domain.PatrolControlVehicle;
 import org.dromara.patrol.domain.PatrolDevice;
+import org.dromara.patrol.domain.PatrolDeviceBinding;
 import org.dromara.patrol.domain.PatrolDeviceCommand;
 import org.dromara.patrol.domain.PatrolDeviceEvent;
 import org.dromara.patrol.domain.PatrolLocationTrack;
 import org.dromara.patrol.domain.PatrolMedia;
 import org.dromara.patrol.domain.PatrolMessage;
 import org.dromara.patrol.domain.PatrolSosEvent;
+import org.dromara.patrol.entity.MediaUploadTaskDto;
 import org.dromara.patrol.mapper.PatrolAlertAttachmentMapper;
+import org.dromara.patrol.mapper.PatrolAlertDispositionMapper;
 import org.dromara.patrol.mapper.PatrolAlertMapper;
+import org.dromara.patrol.mapper.PatrolAppVersionMapper;
 import org.dromara.patrol.mapper.PatrolAuditLogMapper;
 import org.dromara.patrol.mapper.PatrolControlPersonMapper;
 import org.dromara.patrol.mapper.PatrolControlVehicleMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
+import org.dromara.patrol.mapper.PatrolDeviceBindingMapper;
 import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
 import org.dromara.patrol.mapper.PatrolDeviceEventMapper;
 import org.dromara.patrol.mapper.PatrolLocationTrackMapper;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
 import org.dromara.patrol.mapper.PatrolMessageMapper;
 import org.dromara.patrol.mapper.PatrolSosEventMapper;
+import org.dromara.patrol.service.IPatrolAppService;
+import org.dromara.patrol.service.PatrolRealtimePublisher;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -69,12 +78,17 @@ public class PatrolController {
     private final PatrolLocationTrackMapper locationTrackMapper;
     private final PatrolAlertMapper alertMapper;
     private final PatrolAlertAttachmentMapper alertAttachmentMapper;
+    private final PatrolAlertDispositionMapper alertDispositionMapper;
     private final PatrolMediaMapper mediaMapper;
     private final PatrolSosEventMapper sosEventMapper;
     private final PatrolMessageMapper messageMapper;
     private final PatrolAuditLogMapper auditLogMapper;
     private final PatrolControlPersonMapper controlPersonMapper;
     private final PatrolControlVehicleMapper controlVehicleMapper;
+    private final PatrolDeviceBindingMapper deviceBindingMapper;
+    private final PatrolAppVersionMapper appVersionMapper;
+    private final IPatrolAppService patrolAppService;
+    private final PatrolRealtimePublisher realtimePublisher;
 
     @GetMapping("/dashboard/summary")
     public R<DashboardSummaryVo> dashboard() {
@@ -127,6 +141,8 @@ public class PatrolController {
         commandMapper.insert(record);
         saveDeviceEvent(deviceId, "COMMAND", "INFO", "平台下发设备指令", command.command());
         logAudit("COMMAND", "下发设备指令：" + command.command(), deviceId, "SUCCESS");
+        realtimePublisher.publish("DEVICE_COMMAND", "devices", "平台下发设备指令", deviceId + " " + command.command(), deviceId,
+            realtimePublisher.payload("commandId", commandId, "deviceId", deviceId, "command", command.command(), "status", "ACCEPTED"));
         return R.ok(new CommandResultVo(commandId, deviceId, command.command(), "ACCEPTED", record.getResultMessage()));
     }
 
@@ -207,7 +223,12 @@ public class PatrolController {
             "1.6 MB",
             "PENDING",
             "MinIO/patrol-evidence",
-            "2026-05-14 09:20:18"
+            "2026-05-14 09:20:18",
+            null,
+            null,
+            null,
+            null,
+            "/files/MF-SNAPSHOT/download"
         ));
     }
 
@@ -263,7 +284,10 @@ public class PatrolController {
             alert.setStatus("HANDLING");
             alertMapper.updateById(alert);
         }
+        saveAlertDisposition(alertId, "ACK", "HANDLING", null, 0);
         logAudit("ALERT", "确认预警", alertId, "SUCCESS");
+        realtimePublisher.publish("ALERT_UPDATED", "alerts", "预警已确认", alertId + " 已进入处置中", alertId,
+            realtimePublisher.payload("alertId", alertId, "status", "HANDLING"));
         return R.ok(new AlertActionVo(alertId, "HANDLING", "预警已确认，进入处置中"));
     }
 
@@ -277,7 +301,10 @@ public class PatrolController {
             alertMapper.updateById(alert);
         }
         saveAlertAttachments(alertId, bo.attachments());
+        saveAlertDisposition(alertId, "CLOSE", bo.result(), bo.note(), bo.attachments() == null ? 0 : bo.attachments().size());
         logAudit("ALERT", "关闭预警：" + bo.result(), alertId, "SUCCESS");
+        realtimePublisher.publish("ALERT_UPDATED", "alerts", "预警已关闭", alertId + " 处置结果：" + bo.result(), alertId,
+            realtimePublisher.payload("alertId", alertId, "status", "CLOSED", "result", bo.result()));
         return R.ok(new AlertActionVo(alertId, "CLOSED", "处置结果已提交：" + bo.result()));
     }
 
@@ -291,27 +318,89 @@ public class PatrolController {
             .toList());
     }
 
+    @GetMapping("/alerts/{alertId}/dispositions")
+    public R<List<AlertDispositionVo>> alertDispositions(@PathVariable String alertId) {
+        return R.ok(alertDispositionMapper.selectList(new LambdaQueryWrapper<PatrolAlertDisposition>()
+                .eq(PatrolAlertDisposition::getAlertId, alertId)
+                .orderByDesc(PatrolAlertDisposition::getOccurredAt))
+            .stream()
+            .map(this::toAlertDispositionVo)
+            .toList());
+    }
+
     @GetMapping("/media")
     public R<List<MediaVo>> media() {
         return R.ok(mediaMapper.selectList().stream().map(this::toMediaVo).toList());
     }
 
+    @GetMapping("/media/upload-tasks")
+    public R<List<MediaUploadTaskDto>> mediaUploadTasks() {
+        return R.ok(patrolAppService.mediaUploadTasks(1, 200).getItems());
+    }
+
+    @PostMapping("/media/upload-tasks/cleanup")
+    public R<CleanupResultVo> cleanMediaUploadTasks() {
+        Integer cleaned = patrolAppService.cleanExpiredMediaUploadTasks(24);
+        return R.ok(new CleanupResultVo(cleaned, "已清理过期分片上传任务"));
+    }
+
     @PostMapping("/media/{fileId}/verify")
     public R<MediaActionVo> verifyMedia(@PathVariable String fileId) {
-        List<PatrolMedia> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId));
-        files.forEach(item -> {
-            item.setSha256Verified(true);
-            mediaMapper.updateById(item);
-        });
-        logAudit("MEDIA", "校验媒体证据", fileId, files.isEmpty() ? "FAILED" : "SUCCESS");
-        return R.ok(new MediaActionVo(fileId, files.isEmpty() ? "FAILED" : "VERIFIED", files.isEmpty() ? "媒体文件不存在" : "证据完整性校验通过"));
+        boolean verified = patrolAppService.verifyMedia(fileId);
+        logAudit("MEDIA", "校验媒体证据", fileId, verified ? "SUCCESS" : "FAILED");
+        return R.ok(new MediaActionVo(fileId, verified ? "VERIFIED" : "FAILED", verified ? "证据完整性校验通过" : "媒体文件不存在或哈希不匹配"));
     }
 
     @DeleteMapping("/media/{fileId}")
     public R<MediaActionVo> deleteMedia(@PathVariable String fileId) {
         int deleted = mediaMapper.delete(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId));
         logAudit("MEDIA", "删除媒体证据", fileId, deleted > 0 ? "SUCCESS" : "FAILED");
+        realtimePublisher.publish("MEDIA_DELETED", "media", deleted > 0 ? "媒体证据已删除" : "媒体删除失败", fileId, fileId,
+            realtimePublisher.payload("fileId", fileId, "deleted", deleted > 0));
         return R.ok(new MediaActionVo(fileId, deleted > 0 ? "DELETED" : "FAILED", deleted > 0 ? "媒体文件已删除" : "媒体文件不存在"));
+    }
+
+    @GetMapping("/versions")
+    public R<List<AppVersionVo>> versions() {
+        return R.ok(appVersionMapper.selectList(new LambdaQueryWrapper<PatrolAppVersion>()
+                .orderByDesc(PatrolAppVersion::getVersionCode))
+            .stream()
+            .map(this::toAppVersionVo)
+            .toList());
+    }
+
+    @PostMapping("/versions")
+    public R<AppVersionVo> createVersion(@RequestBody AppVersionBo bo) {
+        PatrolAppVersion version = new PatrolAppVersion();
+        version.setVersionId("VER-" + UUID.randomUUID());
+        version.setTenantId(currentTenantId());
+        version.setVersionCode(bo.versionCode());
+        version.setVersionName(blankToDefault(bo.versionName(), "1.0.0"));
+        version.setForceUpdate(Boolean.TRUE.equals(bo.forceUpdate()));
+        version.setChangelog(bo.changelog());
+        version.setDownloadUrl(bo.downloadUrl());
+        version.setSha256(bo.sha256());
+        version.setFileId(bo.fileId());
+        version.setStatus("PUBLISHED");
+        version.setPublishedAt(new Date());
+        version.setDelFlag("0");
+        appVersionMapper.insert(version);
+        logAudit("VERSION", "新增App版本", version.getVersionName(), "SUCCESS");
+        return R.ok(toAppVersionVo(version));
+    }
+
+    @PatchMapping("/versions/{versionId}/status")
+    public R<AppVersionVo> updateVersionStatus(@PathVariable String versionId, @RequestBody StatusBo bo) {
+        PatrolAppVersion version = appVersionMapper.selectById(versionId);
+        if (version != null) {
+            version.setStatus(bo.status());
+            if ("PUBLISHED".equals(bo.status())) {
+                version.setPublishedAt(new Date());
+            }
+            appVersionMapper.updateById(version);
+            logAudit("VERSION", "更新App版本状态：" + bo.status(), versionId, "SUCCESS");
+        }
+        return R.ok(version == null ? null : toAppVersionVo(version));
     }
 
     @GetMapping("/sos")
@@ -329,6 +418,8 @@ public class PatrolController {
             sosEventMapper.updateById(event);
         }
         logAudit("SOS", "关闭SOS求助", sosId, event == null ? "FAILED" : "SUCCESS");
+        realtimePublisher.publish("SOS_CLOSED", "sos", event == null ? "SOS关闭失败" : "SOS求助已关闭", sosId, sosId,
+            realtimePublisher.payload("sosId", sosId, "phase", event == null ? "FAILED" : "CLOSED"));
         return R.ok(new SosActionVo(sosId, event == null ? "FAILED" : "CLOSED", event == null ? "SOS事件不存在" : "SOS事件已关闭"));
     }
 
@@ -352,6 +443,8 @@ public class PatrolController {
         message.setDelFlag("0");
         messageMapper.insert(message);
         logAudit("MESSAGE", "发送指挥消息", messageId, "SUCCESS");
+        realtimePublisher.publish("MESSAGE_SENT", "messages", "指挥消息已发送", message.getTitle(), messageId,
+            realtimePublisher.payload("messageId", messageId, "targetType", message.getTargetType(), "targetId", message.getTargetId(), "title", message.getTitle()));
         return R.ok(new MessageResultVo(messageId, bo.targetId(), "SENT", formatDate(now)));
     }
 
@@ -605,12 +698,32 @@ public class PatrolController {
             media.getFileName(),
             media.getMediaType(),
             blankToDefault(deviceIdByMedia(media), "-"),
-            officerNameByDevice(deviceIdByMedia(media)),
-            media.getStorageSide(),
+            blankToDefault(media.getOfficerName(), officerNameByDevice(deviceIdByMedia(media))),
+            blankToDefault(media.getBizType(), media.getStorageSide()) + "/" + blankToDefault(media.getBizId(), "-"),
             blankToDefault(media.getSizeText(), "-"),
             Boolean.TRUE.equals(media.getSha256Verified()) ? "VERIFIED" : blankToDefault(media.getTransferStatus(), "PENDING"),
             storagePath(media),
-            blankToDefault(media.getCapturedAt(), formatDate(media.getCreateTime()))
+            blankToDefault(media.getCapturedAt(), formatDate(media.getCreateTime())),
+            media.getSha256(),
+            media.getWatermarkToken(),
+            blankToDefault(media.getMimeType(), mediaMimeType(media)),
+            media.getFileSizeBytes(),
+            blankToDefault(media.getContentUri(), "/files/" + media.getFileId() + "/download")
+        );
+    }
+
+    private AppVersionVo toAppVersionVo(PatrolAppVersion version) {
+        return new AppVersionVo(
+            version.getVersionId(),
+            version.getVersionCode(),
+            version.getVersionName(),
+            Boolean.TRUE.equals(version.getForceUpdate()),
+            blankToDefault(version.getChangelog(), ""),
+            blankToDefault(version.getDownloadUrl(), ""),
+            blankToDefault(version.getSha256(), ""),
+            blankToDefault(version.getFileId(), ""),
+            blankToDefault(version.getStatus(), "DRAFT"),
+            formatDate(version.getPublishedAt())
         );
     }
 
@@ -670,18 +783,24 @@ public class PatrolController {
     }
 
     private String officerName(PatrolDevice device) {
-        return "HEADSET_001".equals(device.getDeviceId()) ? "张警官" : "未绑定警员";
+        PatrolDeviceBinding binding = activeBinding(device.getDeviceId());
+        return binding == null ? "未绑定警员" : blankToDefault(binding.getNickName(), binding.getUserName());
     }
 
     private String badgeNo(PatrolDevice device) {
-        return "HEADSET_001".equals(device.getDeviceId()) ? "POLICE_9527" : "-";
+        PatrolDeviceBinding binding = activeBinding(device.getDeviceId());
+        return binding == null ? "-" : blankToDefault(binding.getBadgeNo(), binding.getUserName());
     }
 
     private String deptName(PatrolDevice device) {
-        return "HEADSET_001".equals(device.getDeviceId()) ? "巡逻组 A-42" : "未分配";
+        PatrolDeviceBinding binding = activeBinding(device.getDeviceId());
+        return binding == null ? "未分配" : blankToDefault(binding.getDeptName(), "未分配");
     }
 
     private String deviceIdByMedia(PatrolMedia media) {
+        if (media.getDeviceId() != null && !media.getDeviceId().isBlank()) {
+            return media.getDeviceId();
+        }
         return media.getObjectKey() != null && media.getObjectKey().contains("device/") ? "HEADSET_001" : null;
     }
 
@@ -689,6 +808,16 @@ public class PatrolController {
         String bucket = blankToDefault(media.getBucketName(), "ruoyi");
         String objectKey = blankToDefault(media.getObjectKey(), media.getContentUri());
         return objectKey == null ? bucket : bucket + "/" + objectKey;
+    }
+
+    private String mediaMimeType(PatrolMedia media) {
+        if ("PHOTO".equals(media.getMediaType())) {
+            return "image/jpeg";
+        }
+        if ("AUDIO".equals(media.getMediaType())) {
+            return "audio/mpeg";
+        }
+        return "video/mp4";
     }
 
     private CommandLogVo toCommandLogVo(PatrolDeviceCommand command) {
@@ -727,6 +856,19 @@ public class PatrolController {
             attachment.getSource(),
             attachment.getLocalUri(),
             attachment.getUploadIntent()
+        );
+    }
+
+    private AlertDispositionVo toAlertDispositionVo(PatrolAlertDisposition disposition) {
+        return new AlertDispositionVo(
+            disposition.getDispositionId(),
+            disposition.getAlertId(),
+            disposition.getActionType(),
+            blankToDefault(disposition.getActionResult(), "-"),
+            blankToDefault(disposition.getOperatorName(), "-"),
+            blankToDefault(disposition.getNote(), "-"),
+            value(disposition.getAttachmentsCount()),
+            formatDate(disposition.getOccurredAt())
         );
     }
 
@@ -834,6 +976,22 @@ public class PatrolController {
         });
     }
 
+    private void saveAlertDisposition(String alertId, String actionType, String actionResult, String note, int attachmentsCount) {
+        PatrolAlertDisposition disposition = new PatrolAlertDisposition();
+        disposition.setDispositionId("AD-" + UUID.randomUUID());
+        disposition.setTenantId(currentTenantId());
+        disposition.setAlertId(alertId);
+        disposition.setActionType(actionType);
+        disposition.setActionResult(actionResult);
+        disposition.setOperatorId(currentOperator());
+        disposition.setOperatorName(currentOperator());
+        disposition.setNote(note);
+        disposition.setAttachmentsCount(attachmentsCount);
+        disposition.setOccurredAt(new Date());
+        disposition.setDelFlag("0");
+        alertDispositionMapper.insert(disposition);
+    }
+
     private String targetName(String targetId, String targetType) {
         if ("DEVICE".equals(targetType)) {
             PatrolDevice device = targetId == null ? null : deviceMapper.selectById(targetId);
@@ -843,9 +1001,36 @@ public class PatrolController {
             return "巡逻组 A-42";
         }
         if ("SINGLE".equals(targetType) || "OFFICER".equals(targetType)) {
-            return "张警官";
+            PatrolDeviceBinding binding = activeBindingByBadgeNo(targetId);
+            return binding == null ? blankToDefault(targetId, "-") : blankToDefault(binding.getNickName(), binding.getUserName());
         }
         return blankToDefault(targetId, "-");
+    }
+
+    private PatrolDeviceBinding activeBinding(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return null;
+        }
+        return deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
+                .eq(PatrolDeviceBinding::getDeviceId, deviceId)
+                .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                .orderByDesc(PatrolDeviceBinding::getBoundAt))
+            .stream()
+            .findFirst()
+            .orElse(null);
+    }
+
+    private PatrolDeviceBinding activeBindingByBadgeNo(String badgeNo) {
+        if (badgeNo == null || badgeNo.isBlank()) {
+            return null;
+        }
+        return deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
+                .eq(PatrolDeviceBinding::getBadgeNo, badgeNo)
+                .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                .orderByDesc(PatrolDeviceBinding::getBoundAt))
+            .stream()
+            .findFirst()
+            .orElse(null);
     }
 
     private String currentOperator() {
@@ -889,6 +1074,10 @@ public class PatrolController {
 
     private float value(Float value) {
         return value == null ? 0F : value;
+    }
+
+    private long value(Long value, long defaultValue) {
+        return value == null ? defaultValue : value;
     }
 
     public record MetricVo(String label, String value, String note, String type) {
@@ -951,13 +1140,25 @@ public class PatrolController {
     public record AlertAttachmentVo(String attachmentId, String alertId, String clientFileId, String fileName, String mimeType, Long sizeBytes, String source, String localUri, String uploadIntent) {
     }
 
+    public record AlertDispositionVo(String dispositionId, String alertId, String actionType, String actionResult, String operatorName, String note, Integer attachmentsCount, String occurredAt) {
+    }
+
     public record AlertActionVo(String alertId, String nextStatus, String message) {
     }
 
-    public record MediaVo(String fileId, String fileName, String mediaType, String deviceId, String officerName, String bizRef, String sizeText, String verifyStatus, String storagePath, String capturedAt) {
+    public record MediaVo(String fileId, String fileName, String mediaType, String deviceId, String officerName, String bizRef, String sizeText, String verifyStatus, String storagePath, String capturedAt, String sha256, String watermarkToken, String mimeType, Long fileSizeBytes, String contentUri) {
     }
 
     public record MediaActionVo(String fileId, String status, String message) {
+    }
+
+    public record CleanupResultVo(Integer cleaned, String message) {
+    }
+
+    public record AppVersionVo(String versionId, Integer versionCode, String versionName, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId, String status, String publishedAt) {
+    }
+
+    public record AppVersionBo(Integer versionCode, String versionName, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId) {
     }
 
     public record SosVo(String sosId, String officerName, String badgeNo, String deptName, String deviceId, String locationText, String status, String disposition, Boolean recordingAudio, Integer backupEtaMinutes, String createdAt) {

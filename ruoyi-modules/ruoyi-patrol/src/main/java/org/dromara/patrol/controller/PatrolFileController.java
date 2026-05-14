@@ -24,7 +24,13 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.DigestOutputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 
@@ -53,16 +59,22 @@ public class PatrolFileController {
 
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ApiEnvelope<MediaFileDto> upload(@RequestPart("file") MultipartFile file) {
+        String sha256 = sha256(file);
         SysOssVo oss = ossService.upload(file);
         String fileId = fileId(oss.getOssId());
+        String uploadedAt = Date.from(Instant.now()).toString();
+        String username = LoginHelper.getUsername();
         PatrolMedia media = new PatrolMedia();
+        media.setMediaId(IdUtil.getSnowflakeNextId());
         media.setTenantId(LoginHelper.getTenantId());
         media.setFileId(fileId);
         media.setFileName(StringUtils.blankToDefault(file.getOriginalFilename(), oss.getOriginalName()));
         media.setMediaType(mediaType(media.getFileName(), file.getContentType()));
-        media.setCapturedAt("刚刚");
+        media.setCapturedAt(uploadedAt);
         media.setSizeText(sizeText(file.getSize()));
-        media.setSha256Verified(false);
+        media.setFileSizeBytes(file.getSize());
+        media.setMimeType(StringUtils.blankToDefault(file.getContentType(), "application/octet-stream"));
+        media.setSha256Verified(true);
         media.setStorageSide("DEVICE");
         media.setTransferStatus("IDLE");
         media.setProgress(0F);
@@ -70,6 +82,13 @@ public class PatrolFileController {
         media.setOssId(oss.getOssId());
         media.setBucketName("ruoyi");
         media.setObjectKey(oss.getFileName());
+        media.setSha256(sha256);
+        media.setWatermarkToken(watermarkToken(sha256, username, "", uploadedAt));
+        media.setBadgeNo(username);
+        media.setOfficerName(username);
+        media.setBizType("DEVICE_FILE");
+        media.setBizId(fileId);
+        media.setEvidenceSource("DEVICE_UPLOAD");
         media.setDelFlag("0");
         mediaMapper.insert(media);
         return ok(toMediaDto(media));
@@ -158,6 +177,36 @@ public class PatrolFileController {
             return String.format("%.1f KB", bytes / 1024D);
         }
         return String.format("%.1f MB", bytes / 1024D / 1024D);
+    }
+
+    private String sha256(MultipartFile file) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (DigestOutputStream output = new DigestOutputStream(OutputStream.nullOutputStream(), digest)) {
+                file.getInputStream().transferTo(output);
+            }
+            return hex(digest.digest());
+        } catch (IOException | NoSuchAlgorithmException e) {
+            throw new ServiceException("计算文件SHA-256失败：" + e.getMessage());
+        }
+    }
+
+    private String watermarkToken(String sha256, String badgeNo, String deviceId, String uploadedAt) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            String payload = sha256 + "|" + StringUtils.blankToDefault(badgeNo, "") + "|" + StringUtils.blankToDefault(deviceId, "") + "|" + StringUtils.blankToDefault(uploadedAt, "");
+            return hex(digest.digest(payload.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new ServiceException("生成证据水印令牌失败：" + e.getMessage());
+        }
+    }
+
+    private String hex(byte[] bytes) {
+        StringBuilder builder = new StringBuilder(bytes.length * 2);
+        for (byte item : bytes) {
+            builder.append(String.format("%02x", item));
+        }
+        return builder.toString();
     }
 
     private <T> ApiEnvelope<T> ok(T data) {

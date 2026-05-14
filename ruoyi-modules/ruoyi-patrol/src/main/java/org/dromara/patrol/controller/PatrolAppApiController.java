@@ -6,13 +6,19 @@ import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.ApiEnvelope;
 import org.dromara.patrol.entity.AuthSessionDto;
+import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
+import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
+import org.dromara.patrol.entity.DeviceControlResultDto;
 import org.dromara.patrol.entity.DeviceStatusDto;
+import org.dromara.patrol.entity.DeviceWifiStateDto;
 import org.dromara.patrol.entity.GpsLocationDto;
 import org.dromara.patrol.entity.HeartbeatAckDto;
 import org.dromara.patrol.entity.HeartbeatRequestDto;
 import org.dromara.patrol.entity.LoginRequestDto;
 import org.dromara.patrol.entity.MediaFileDto;
+import org.dromara.patrol.entity.MediaUploadTaskCreateDto;
+import org.dromara.patrol.entity.MediaUploadTaskDto;
 import org.dromara.patrol.entity.PageEnvelope;
 import org.dromara.patrol.entity.PatrolAreaDto;
 import org.dromara.patrol.entity.PatrolMessageDto;
@@ -22,6 +28,7 @@ import org.dromara.patrol.entity.StreamRelayRequestDto;
 import org.dromara.patrol.entity.StreamRelayStateDto;
 import org.dromara.patrol.entity.TransferRequestDto;
 import org.dromara.patrol.entity.UserProfileDto;
+import org.dromara.patrol.entity.VersionCheckDto;
 import org.dromara.patrol.service.IPatrolAppService;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -30,7 +37,10 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.MediaType;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.Map;
@@ -79,6 +89,41 @@ public class PatrolAppApiController {
         return ok(patrolAppService.sendDeviceCommand(deviceId, request));
     }
 
+    @GetMapping("/devices/{deviceId}/capabilities")
+    public ApiEnvelope<DeviceCapabilitiesDto> deviceCapabilities(@PathVariable String deviceId) {
+        return ok(patrolAppService.deviceCapabilities(deviceId));
+    }
+
+    @GetMapping("/devices/{deviceId}/wifi")
+    public ApiEnvelope<DeviceWifiStateDto> deviceWifi(@PathVariable String deviceId) {
+        return ok(patrolAppService.deviceWifi(deviceId));
+    }
+
+    @PostMapping("/devices/{deviceId}/wifi")
+    public ApiEnvelope<DeviceWifiStateDto> configureWifi(@PathVariable String deviceId, @RequestBody DeviceWifiStateDto request) {
+        return ok(patrolAppService.configureWifi(deviceId, request));
+    }
+
+    @PostMapping("/devices/{deviceId}/settings")
+    public ApiEnvelope<DeviceAdvancedSettingsDto> applySettings(@PathVariable String deviceId, @RequestBody DeviceAdvancedSettingsDto request) {
+        return ok(patrolAppService.applySettings(deviceId, request));
+    }
+
+    @PostMapping("/devices/{deviceId}/realtime-audio/start")
+    public ApiEnvelope<DeviceControlResultDto> startRealtimeAudioSync(@PathVariable String deviceId) {
+        return ok(patrolAppService.startRealtimeAudioSync(deviceId));
+    }
+
+    @PostMapping("/devices/{deviceId}/realtime-audio/stop")
+    public ApiEnvelope<DeviceControlResultDto> stopRealtimeAudioSync(@PathVariable String deviceId) {
+        return ok(patrolAppService.stopRealtimeAudioSync(deviceId));
+    }
+
+    @PostMapping("/devices/{deviceId}/media-sync/completed")
+    public ApiEnvelope<DeviceControlResultDto> notifyMediaSyncCompleted(@PathVariable String deviceId) {
+        return ok(patrolAppService.notifyMediaSyncCompleted(deviceId));
+    }
+
     @GetMapping("/alerts")
     public ApiEnvelope<PageEnvelope<AlertDto>> alerts(
         @RequestParam(defaultValue = "1") int page,
@@ -102,6 +147,55 @@ public class PatrolAppApiController {
         @RequestParam(defaultValue = "1") int page,
         @RequestParam(defaultValue = "50") int pageSize) {
         return ok(patrolAppService.mediaFiles(side, page, pageSize));
+    }
+
+    @PostMapping(value = "/media/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ApiEnvelope<MediaFileDto> uploadMedia(
+        @RequestPart("file") MultipartFile file,
+        @RequestParam(defaultValue = "PHONE") String storageSide,
+        @RequestParam(defaultValue = "") String bizType,
+        @RequestParam(defaultValue = "") String bizId) {
+        return ok(patrolAppService.uploadMedia(file, storageSide, bizType, bizId));
+    }
+
+    @PostMapping("/media/upload-tasks")
+    public ApiEnvelope<MediaUploadTaskDto> createMediaUploadTask(@RequestBody MediaUploadTaskCreateDto request) {
+        return ok(patrolAppService.createMediaUploadTask(request));
+    }
+
+    @GetMapping("/media/upload-tasks")
+    public ApiEnvelope<PageEnvelope<MediaUploadTaskDto>> mediaUploadTasks(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return ok(patrolAppService.mediaUploadTasks(page, pageSize));
+    }
+
+    @GetMapping("/media/upload-tasks/{taskId}")
+    public ApiEnvelope<MediaUploadTaskDto> mediaUploadTask(@PathVariable String taskId) {
+        return ok(patrolAppService.mediaUploadTask(taskId));
+    }
+
+    @PostMapping(value = "/media/upload-tasks/{taskId}/chunks/{chunkIndex}", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ApiEnvelope<MediaUploadTaskDto> uploadMediaChunk(
+        @PathVariable String taskId,
+        @PathVariable int chunkIndex,
+        @RequestPart("chunk") MultipartFile chunk) {
+        return ok(patrolAppService.uploadMediaChunk(taskId, chunkIndex, chunk));
+    }
+
+    @PostMapping("/media/upload-tasks/{taskId}/complete")
+    public ApiEnvelope<MediaUploadTaskDto> completeMediaUploadTask(@PathVariable String taskId) {
+        return ok(patrolAppService.completeMediaUploadTask(taskId));
+    }
+
+    @PostMapping("/media/upload-tasks/{taskId}/retry")
+    public ApiEnvelope<MediaUploadTaskDto> retryMediaUploadTask(@PathVariable String taskId) {
+        return ok(patrolAppService.retryMediaUploadTask(taskId));
+    }
+
+    @DeleteMapping("/media/upload-tasks/{taskId}")
+    public ApiEnvelope<MediaUploadTaskDto> cancelMediaUploadTask(@PathVariable String taskId) {
+        return ok(patrolAppService.cancelMediaUploadTask(taskId));
     }
 
     @PostMapping("/media/{fileId}/transfer")
@@ -160,6 +254,11 @@ public class PatrolAppApiController {
     @PostMapping("/sos/cancel")
     public ApiEnvelope<SosEventDto> cancelSos() {
         return ok(patrolAppService.cancelSos());
+    }
+
+    @GetMapping("/version/check")
+    public ApiEnvelope<VersionCheckDto> checkVersion(@RequestParam(defaultValue = "1") int currentVersionCode) {
+        return ok(patrolAppService.checkVersion(currentVersionCode));
     }
 
     private <T> ApiEnvelope<T> ok(T data) {

@@ -3,13 +3,19 @@ package org.dromara.patrol.service;
 import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.AuthSessionDto;
+import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
+import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
+import org.dromara.patrol.entity.DeviceControlResultDto;
 import org.dromara.patrol.entity.DeviceStatusDto;
+import org.dromara.patrol.entity.DeviceWifiStateDto;
 import org.dromara.patrol.entity.GpsLocationDto;
 import org.dromara.patrol.entity.HeartbeatAckDto;
 import org.dromara.patrol.entity.HeartbeatRequestDto;
 import org.dromara.patrol.entity.LoginRequestDto;
 import org.dromara.patrol.entity.MediaFileDto;
+import org.dromara.patrol.entity.MediaUploadTaskCreateDto;
+import org.dromara.patrol.entity.MediaUploadTaskDto;
 import org.dromara.patrol.entity.PageEnvelope;
 import org.dromara.patrol.entity.PatrolAreaDto;
 import org.dromara.patrol.entity.PatrolMessageDto;
@@ -19,6 +25,8 @@ import org.dromara.patrol.entity.StreamRelayRequestDto;
 import org.dromara.patrol.entity.StreamRelayStateDto;
 import org.dromara.patrol.entity.TransferRequestDto;
 import org.dromara.patrol.entity.UserProfileDto;
+import org.dromara.patrol.entity.VersionCheckDto;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.Map;
@@ -40,6 +48,20 @@ public interface IPatrolAppService {
 
     DeviceStatusDto sendDeviceCommand(String deviceId, DeviceCommandRequestDto request);
 
+    DeviceCapabilitiesDto deviceCapabilities(String deviceId);
+
+    DeviceWifiStateDto deviceWifi(String deviceId);
+
+    DeviceWifiStateDto configureWifi(String deviceId, DeviceWifiStateDto request);
+
+    DeviceAdvancedSettingsDto applySettings(String deviceId, DeviceAdvancedSettingsDto request);
+
+    DeviceControlResultDto startRealtimeAudioSync(String deviceId);
+
+    DeviceControlResultDto stopRealtimeAudioSync(String deviceId);
+
+    DeviceControlResultDto notifyMediaSyncCompleted(String deviceId);
+
     PageEnvelope<AlertDto> alerts(int page, int pageSize);
 
     AlertDto acknowledgeAlert(String alertId);
@@ -47,6 +69,24 @@ public interface IPatrolAppService {
     AlertDto closeAlert(String alertId, AlertCloseRequestDto request);
 
     PageEnvelope<MediaFileDto> mediaFiles(String side, int page, int pageSize);
+
+    MediaFileDto uploadMedia(MultipartFile file, String storageSide, String bizType, String bizId);
+
+    MediaUploadTaskDto createMediaUploadTask(MediaUploadTaskCreateDto request);
+
+    MediaUploadTaskDto uploadMediaChunk(String taskId, int chunkIndex, MultipartFile chunk);
+
+    MediaUploadTaskDto completeMediaUploadTask(String taskId);
+
+    MediaUploadTaskDto mediaUploadTask(String taskId);
+
+    PageEnvelope<MediaUploadTaskDto> mediaUploadTasks(int page, int pageSize);
+
+    MediaUploadTaskDto retryMediaUploadTask(String taskId);
+
+    MediaUploadTaskDto cancelMediaUploadTask(String taskId);
+
+    Integer cleanExpiredMediaUploadTasks(int retentionHours);
 
     List<MediaFileDto> transferMedia(String fileId, TransferRequestDto request);
 
@@ -69,4 +109,6 @@ public interface IPatrolAppService {
     SosEventDto activateSos(GpsLocationDto location);
 
     SosEventDto cancelSos();
+
+    VersionCheckDto checkVersion(int currentVersionCode);
 }
