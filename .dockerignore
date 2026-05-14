@@ -1,0 +1,6 @@
+.git
+.idea
+**/target
+**/.flattened-pom.xml
+logs
+temp
