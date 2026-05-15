@@ -501,6 +501,24 @@ create table if not exists patrol_device_config (
     unique key uk_patrol_device_config_device (tenant_id, device_id)
 ) engine=innodb default charset=utf8mb4 comment='设备能力与高级配置表';
 
+create table if not exists patrol_cerebellum_config (
+    config_id   varchar(64)   not null comment '配置ID',
+    tenant_id   varchar(20)   default '000000' comment '租户编号',
+    user_id     bigint(20)    not null comment '用户ID',
+    user_name   varchar(64)   default null comment '用户姓名',
+    badge_no    varchar(64)   default null comment '警号',
+    base_url    varchar(500)  default null comment '小脑服务地址',
+    api_key     varchar(255)  default null comment '小脑API Key',
+    create_dept bigint(20)    default null comment '创建部门',
+    create_by   bigint(20)    default null comment '创建者',
+    create_time datetime      default null comment '创建时间',
+    update_by   bigint(20)    default null comment '更新者',
+    update_time datetime      default null comment '更新时间',
+    del_flag    char(1)       default '0' comment '删除标志',
+    primary key (config_id),
+    unique key uk_patrol_cerebellum_user (tenant_id, user_id)
+) engine=innodb default charset=utf8mb4 comment='用户小脑连接配置表';
+
 create table if not exists patrol_app_version (
     version_id   varchar(64)  not null comment '版本ID',
     tenant_id    varchar(20)  default '000000' comment '租户编号',

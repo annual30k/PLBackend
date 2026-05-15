@@ -230,6 +230,8 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     public CerebellumSettingsDto saveCerebellumSettings(CerebellumSettingsDto request) {
         LoginUser loginUser = LoginHelper.getLoginUser();
         return TenantHelper.dynamic(TENANT_ID, () -> {
+            SysUserVo user = userMapper.selectVoOne(new LambdaQueryWrapper<SysUser>()
+                .eq(SysUser::getUserId, loginUser.getUserId()));
             PatrolCerebellumConfig config = findCerebellumConfig(loginUser.getUserId());
             if (config == null) {
                 config = new PatrolCerebellumConfig();
@@ -238,8 +240,8 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 config.setUserId(loginUser.getUserId());
                 config.setDelFlag("0");
             }
-            config.setUserName(blankToDefault(loginUser.getUsername(), ""));
-            config.setBadgeNo(blankToDefault(loginUser.getUsername(), ""));
+            config.setUserName(user == null ? blankToDefault(loginUser.getNickname(), loginUser.getUsername()) : blankToDefault(user.getNickName(), user.getUserName()));
+            config.setBadgeNo(user == null ? blankToDefault(loginUser.getUsername(), "") : blankToDefault(user.getUserName(), loginUser.getUsername()));
             config.setBaseUrl(blankToDefault(request == null ? null : request.getBaseUrl(), "").trim());
             config.setApiKey(blankToDefault(request == null ? null : request.getApiKey(), "").trim());
             cerebellumConfigMapper.insertOrUpdate(config);
@@ -1253,6 +1255,22 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         config.setDelFlag("0");
         deviceConfigMapper.insert(config);
         return config;
+    }
+
+    private PatrolCerebellumConfig findCerebellumConfig(Long userId) {
+        if (userId == null) {
+            return null;
+        }
+        return cerebellumConfigMapper.selectOne(new LambdaQueryWrapper<PatrolCerebellumConfig>()
+            .eq(PatrolCerebellumConfig::getUserId, userId)
+            .last("limit 1"));
+    }
+
+    private CerebellumSettingsDto toCerebellumSettingsDto(PatrolCerebellumConfig config) {
+        return new CerebellumSettingsDto(
+            blankToDefault(config.getBaseUrl(), ""),
+            blankToDefault(config.getApiKey(), "")
+        );
     }
 
     private void applyDefaultCapabilities(PatrolDeviceConfig config, String deviceType) {

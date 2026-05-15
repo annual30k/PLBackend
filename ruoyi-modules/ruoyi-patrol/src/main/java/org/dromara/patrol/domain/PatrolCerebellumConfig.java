@@ -32,7 +32,7 @@ public class PatrolCerebellumConfig extends TenantEntity {
     private Long userId;
 
     /**
-     * 用户名/警号
+     * 用户姓名
      */
     private String userName;
 
