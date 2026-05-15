@@ -120,7 +120,7 @@ security:
 # 多租户配置
 tenant:
   # 是否开启
-  enable: true
+  enable: false
   # 排除表
   excludes:
     - sys_menu
@@ -133,6 +133,16 @@ tenant:
     - sys_client
     - sys_oss_config
     - flow_spel
+
+patrollink:
+  menu:
+    # 需要从后台侧边栏隐藏的菜单名称；改这里即可恢复或继续隐藏菜单
+    hidden-names:
+      - 系统工具
+      - 测试菜单
+      - PLUS官网
+      - 工作流
+      - 我的任务
 
 # MyBatisPlus配置
 # https://baomidou.com/config/

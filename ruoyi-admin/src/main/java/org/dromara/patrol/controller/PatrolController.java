@@ -20,6 +20,7 @@ import org.dromara.patrol.domain.PatrolAppVersion;
 import org.dromara.patrol.domain.PatrolAuditLog;
 import org.dromara.patrol.domain.PatrolControlPerson;
 import org.dromara.patrol.domain.PatrolControlVehicle;
+import org.dromara.patrol.domain.PatrolDailyReport;
 import org.dromara.patrol.domain.PatrolDevice;
 import org.dromara.patrol.domain.PatrolDeviceBinding;
 import org.dromara.patrol.domain.PatrolDeviceCommand;
@@ -48,6 +49,7 @@ import org.dromara.patrol.mapper.PatrolAppVersionMapper;
 import org.dromara.patrol.mapper.PatrolAuditLogMapper;
 import org.dromara.patrol.mapper.PatrolControlPersonMapper;
 import org.dromara.patrol.mapper.PatrolControlVehicleMapper;
+import org.dromara.patrol.mapper.PatrolDailyReportMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
 import org.dromara.patrol.mapper.PatrolDeviceBindingMapper;
 import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
@@ -141,6 +143,7 @@ public class PatrolController {
     private final PatrolSosDispositionMapper sosDispositionMapper;
     private final PatrolControlPersonMapper controlPersonMapper;
     private final PatrolControlVehicleMapper controlVehicleMapper;
+    private final PatrolDailyReportMapper dailyReportMapper;
     private final PatrolDeviceBindingMapper deviceBindingMapper;
     private final PatrolAppVersionMapper appVersionMapper;
     private final PatrolDeviceConfigMapper deviceConfigMapper;
@@ -486,6 +489,36 @@ public class PatrolController {
         realtimePublisher.publish("MEDIA_DELETED", "media", deleted > 0 ? "媒体证据已删除" : "媒体删除失败", fileId, fileId,
             realtimePublisher.payload("fileId", fileId, "deleted", deleted > 0));
         return R.ok(new MediaActionVo(fileId, deleted > 0 ? "DELETED" : "FAILED", deleted > 0 ? "媒体文件已删除" : "媒体文件不存在"));
+    }
+
+    @GetMapping("/daily-reports")
+    public R<List<DailyReportVo>> dailyReports(
+        @RequestParam(defaultValue = "") String missionId,
+        @RequestParam(defaultValue = "") String status) {
+        LambdaQueryWrapper<PatrolDailyReport> wrapper = new LambdaQueryWrapper<PatrolDailyReport>()
+            .like(missionId != null && !missionId.isBlank(), PatrolDailyReport::getMissionId, missionId)
+            .eq(status != null && !status.isBlank(), PatrolDailyReport::getStatus, status)
+            .orderByDesc(PatrolDailyReport::getGeneratedAt);
+        return R.ok(dailyReportMapper.selectList(wrapper).stream().map(this::toDailyReportVo).toList());
+    }
+
+    @GetMapping("/daily-reports/{reportId}")
+    public R<DailyReportVo> dailyReport(@PathVariable String reportId) {
+        return R.ok(toDailyReportVo(dailyReportMapper.selectById(reportId)));
+    }
+
+    @PatchMapping("/daily-reports/{reportId}/status")
+    public R<DailyReportVo> updateDailyReportStatus(@PathVariable String reportId, @RequestBody StatusBo bo) {
+        PatrolDailyReport report = dailyReportMapper.selectById(reportId);
+        if (report == null) {
+            throw new ServiceException("日报不存在");
+        }
+        report.setStatus(blankToDefault(bo.status(), "REVIEWED"));
+        dailyReportMapper.updateById(report);
+        logAudit("DAILY_REPORT", "更新日报状态：" + report.getStatus(), reportId, "SUCCESS");
+        realtimePublisher.publish("DAILY_REPORT_UPDATED", "reports", "日报状态已更新", reportId + " " + report.getStatus(), reportId,
+            realtimePublisher.payload("reportId", reportId, "status", report.getStatus()));
+        return R.ok(toDailyReportVo(report));
     }
 
     @GetMapping("/versions")
@@ -1176,6 +1209,29 @@ public class PatrolController {
             blankToDefault(media.getMimeType(), mediaMimeType(media)),
             media.getFileSizeBytes(),
             blankToDefault(media.getContentUri(), "/files/" + media.getFileId() + "/download")
+        );
+    }
+
+    private DailyReportVo toDailyReportVo(PatrolDailyReport report) {
+        if (report == null) {
+            return null;
+        }
+        return new DailyReportVo(
+            report.getReportId(),
+            blankToDefault(report.getMissionId(), "-"),
+            blankToDefault(report.getReportType(), "daily"),
+            blankToDefault(report.getDeviceId(), "-"),
+            blankToDefault(report.getOperatorId(), "-"),
+            blankToDefault(report.getOfficerName(), "-"),
+            blankToDefault(report.getModel(), "-"),
+            blankToDefault(report.getBackend(), "-"),
+            formatDate(report.getGeneratedAt()),
+            blankToDefault(report.getContent(), ""),
+            blankToDefault(report.getMediaSelectionJson(), "{}"),
+            blankToDefault(report.getStructuredContextJson(), "{}"),
+            Boolean.TRUE.equals(report.getRequiresHumanConfirmation()),
+            blankToDefault(report.getStatus(), "PENDING_REVIEW"),
+            blankToDefault(report.getSubmitSource(), "CEREBELLUM")
         );
     }
 
@@ -1930,6 +1986,9 @@ public class PatrolController {
     }
 
     public record CleanupResultVo(Integer cleaned, String message) {
+    }
+
+    public record DailyReportVo(String reportId, String missionId, String reportType, String deviceId, String operatorId, String officerName, String model, String backend, String generatedAt, String content, String mediaSelectionJson, String structuredContextJson, Boolean requiresHumanConfirmation, String status, String submitSource) {
     }
 
     public record AppVersionVo(String versionId, Integer versionCode, String versionName, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId, String status, String publishedAt) {

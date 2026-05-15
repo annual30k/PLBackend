@@ -1,14 +1,18 @@
 package org.dromara.patrol.controller;
 
 import cn.dev33.satoken.annotation.SaIgnore;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import org.dromara.patrol.domain.PatrolDailyReport;
 import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.ApiEnvelope;
 import org.dromara.patrol.entity.AuthSessionDto;
 import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
+import org.dromara.patrol.entity.CerebellumDailyReportRequestDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
@@ -38,6 +42,7 @@ import org.dromara.patrol.entity.StreamRelayStateDto;
 import org.dromara.patrol.entity.TransferRequestDto;
 import org.dromara.patrol.entity.UserProfileDto;
 import org.dromara.patrol.entity.VersionCheckDto;
+import org.dromara.patrol.mapper.PatrolDailyReportMapper;
 import org.dromara.patrol.service.CerebellumAccessGuard;
 import org.dromara.patrol.service.IPatrolAppService;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -52,6 +57,12 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.http.MediaType;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -65,9 +76,12 @@ import java.util.UUID;
 public class PatrolAppApiController {
 
     private static final long RESPONSE_TIME = 1715832000L;
+    private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final IPatrolAppService patrolAppService;
     private final CerebellumAccessGuard cerebellumAccessGuard;
+    private final PatrolDailyReportMapper dailyReportMapper;
+    private final ObjectMapper objectMapper;
 
     @SaIgnore
     @PostMapping("/auth/login")
@@ -340,6 +354,45 @@ public class PatrolAppApiController {
         return ok(patrolAppService.reportCerebellumFaceAlert(request));
     }
 
+    @SaIgnore
+    @PostMapping("/cerebellum/daily-reports")
+    public ApiEnvelope<DeviceControlResultDto> reportCerebellumDailyReport(
+        HttpServletRequest httpRequest,
+        HttpServletResponse response,
+        @RequestBody CerebellumDailyReportRequestDto request) {
+        if (!cerebellumAccessGuard.isAllowed(httpRequest)) {
+            return unauthorized(response);
+        }
+        String reportId = blankToDefault(request.getReportId(), "RPT-" + UUID.randomUUID());
+        PatrolDailyReport report = dailyReportMapper.selectById(reportId);
+        if (report == null) {
+            report = new PatrolDailyReport();
+            report.setReportId(reportId);
+            report.setTenantId("000000");
+            report.setDelFlag("0");
+        }
+        report.setMissionId(request.getMissionId());
+        report.setReportType(blankToDefault(request.getReportType(), "daily"));
+        report.setDeviceId(request.getDeviceId());
+        report.setOperatorId(request.getOperatorId());
+        report.setOfficerName(request.getOfficerName());
+        report.setModel(request.getModel());
+        report.setBackend(request.getBackend());
+        report.setGeneratedAt(parseDate(request.getGeneratedAt()));
+        report.setContent(request.getContent());
+        report.setRequiresHumanConfirmation(Boolean.TRUE.equals(request.getRequiresHumanConfirmation()));
+        report.setMediaSelectionJson(toJson(request.getMediaSelection()));
+        report.setStructuredContextJson(toJson(request.getStructuredContext()));
+        report.setStatus("PENDING_REVIEW");
+        report.setSubmitSource("CEREBELLUM");
+        if (dailyReportMapper.selectById(reportId) == null) {
+            dailyReportMapper.insert(report);
+        } else {
+            dailyReportMapper.updateById(report);
+        }
+        return ok(new DeviceControlResultDto(true, "PENDING_REVIEW", "小脑日报已提交后台"));
+    }
+
     private <T> ApiEnvelope<T> ok(T data) {
         return new ApiEnvelope<>(200, "OK", data, UUID.randomUUID().toString(), RESPONSE_TIME);
     }
@@ -347,5 +400,39 @@ public class PatrolAppApiController {
     private <T> ApiEnvelope<T> unauthorized(HttpServletResponse response) {
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         return new ApiEnvelope<>(401, "Unauthorized", null, UUID.randomUUID().toString(), RESPONSE_TIME);
+    }
+
+    private String toJson(Object value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            return String.valueOf(value);
+        }
+    }
+
+    private Date parseDate(String value) {
+        if (value == null || value.isBlank()) {
+            return new Date();
+        }
+        try {
+            return Date.from(OffsetDateTime.parse(value).toInstant());
+        } catch (Exception ignored) {
+            try {
+                return Date.from(Instant.parse(value));
+            } catch (Exception ignoredAgain) {
+                try {
+                    return Date.from(LocalDateTime.parse(value, DATE_TIME_FORMATTER).atZone(ZoneId.systemDefault()).toInstant());
+                } catch (Exception ignoredThird) {
+                    return new Date();
+                }
+            }
+        }
+    }
+
+    private String blankToDefault(String value, String defaultValue) {
+        return value == null || value.isBlank() ? defaultValue : value;
     }
 }

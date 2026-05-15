@@ -19,11 +19,16 @@ import org.dromara.system.domain.bo.SysMenuBo;
 import org.dromara.system.domain.vo.RouterVo;
 import org.dromara.system.domain.vo.SysMenuVo;
 import org.dromara.system.service.ISysMenuService;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.core.env.Environment;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 菜单信息
@@ -38,6 +43,8 @@ public class SysMenuController extends BaseController {
 
     private final ISysMenuService menuService;
 
+    private final Environment environment;
+
     /**
      * 获取路由信息
      *
@@ -46,7 +53,32 @@ public class SysMenuController extends BaseController {
     @GetMapping("/getRouters")
     public R<List<RouterVo>> getRouters() {
         List<SysMenu> menus = menuService.selectMenuTreeByUserId(LoginHelper.getUserId());
+        menus = filterHiddenMenus(menus);
         return R.ok(menuService.buildMenus(menus));
+    }
+
+    private List<SysMenu> filterHiddenMenus(List<SysMenu> menus) {
+        List<String> hiddenMenuNames = Binder.get(environment)
+            .bind("patrollink.menu.hidden-names", Bindable.listOf(String.class))
+            .orElse(List.of());
+        if (menus == null || hiddenMenuNames == null || hiddenMenuNames.isEmpty()) {
+            return menus;
+        }
+        Set<String> hiddenNames = hiddenMenuNames.stream()
+            .filter(StringUtils::isNotBlank)
+            .map(String::trim)
+            .collect(Collectors.toSet());
+        return filterHiddenMenus(menus, hiddenNames);
+    }
+
+    private List<SysMenu> filterHiddenMenus(List<SysMenu> menus, Set<String> hiddenNames) {
+        if (menus == null || hiddenNames.isEmpty()) {
+            return menus;
+        }
+        return menus.stream()
+            .filter(menu -> !hiddenNames.contains(StringUtils.trimToEmpty(menu.getMenuName())))
+            .peek(menu -> menu.setChildren(filterHiddenMenus(menu.getChildren(), hiddenNames)))
+            .toList();
     }
 
     /**
