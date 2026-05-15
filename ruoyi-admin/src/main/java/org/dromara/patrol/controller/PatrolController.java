@@ -328,8 +328,8 @@ public class PatrolController {
             "MF-SNAPSHOT-" + System.currentTimeMillis(),
             sessionId + "_snapshot.jpg",
             "PHOTO",
-            "HEADSET-012",
-            "张建国",
+            "",
+            "-",
             sessionId,
             "1.6 MB",
             "PENDING",
@@ -518,6 +518,20 @@ public class PatrolController {
         logAudit("DAILY_REPORT", "更新日报状态：" + report.getStatus(), reportId, "SUCCESS");
         realtimePublisher.publish("DAILY_REPORT_UPDATED", "reports", "日报状态已更新", reportId + " " + report.getStatus(), reportId,
             realtimePublisher.payload("reportId", reportId, "status", report.getStatus()));
+        return R.ok(toDailyReportVo(report));
+    }
+
+    @PatchMapping("/daily-reports/{reportId}/content")
+    public R<DailyReportVo> updateDailyReportContent(@PathVariable String reportId, @RequestBody DailyReportContentBo bo) {
+        PatrolDailyReport report = dailyReportMapper.selectById(reportId);
+        if (report == null) {
+            throw new ServiceException("日报不存在");
+        }
+        report.setContent(blankToDefault(bo.content(), ""));
+        dailyReportMapper.updateById(report);
+        logAudit("DAILY_REPORT", "更新日报正文", reportId, "SUCCESS");
+        realtimePublisher.publish("DAILY_REPORT_UPDATED", "reports", "日报正文已更新", reportId, reportId,
+            realtimePublisher.payload("reportId", reportId, "contentUpdated", true));
         return R.ok(toDailyReportVo(report));
     }
 
@@ -936,16 +950,10 @@ public class PatrolController {
                 new MetricVo("媒体证据", String.valueOf(media.size()), "设备侧 + 云端", "info")
             ),
             List.of(
-                new TrendPointVo("05-08", 1, 0, 1, 0),
-                new TrendPointVo("05-09", 2, 0, 1, 1),
-                new TrendPointVo("05-10", 1, 1, 2, 1),
-                new TrendPointVo("05-11", 2, 0, 2, 0),
-                new TrendPointVo("05-12", 3, 0, 3, 2),
-                new TrendPointVo("05-13", 2, 1, 4, 1),
                 new TrendPointVo("05-14", alerts.size(), sosEvents.size(), media.size(), commandMapper.selectCount(new LambdaQueryWrapper<>()).intValue())
             ),
             List.of(
-                new RankingItemVo("HEADSET_001", Math.toIntExact(commandMapper.selectCount(new LambdaQueryWrapper<PatrolDeviceCommand>().eq(PatrolDeviceCommand::getDeviceId, "HEADSET_001"))), "指令次数"),
+                new RankingItemVo("设备指令", Math.toIntExact(commandMapper.selectCount(new LambdaQueryWrapper<PatrolDeviceCommand>())), "指令次数"),
                 new RankingItemVo("未处置预警", Math.toIntExact(pendingAlerts), "当前积压"),
                 new RankingItemVo("媒体待校验", Math.toIntExact(media.stream().filter(item -> !Boolean.TRUE.equals(item.getSha256Verified())).count()), "证据完整性")
             ),
@@ -1227,6 +1235,9 @@ public class PatrolController {
             blankToDefault(report.getBackend(), "-"),
             formatDate(report.getGeneratedAt()),
             blankToDefault(report.getContent(), ""),
+            blankToDefault(report.getDocumentUri(), ""),
+            blankToDefault(report.getDocumentName(), ""),
+            blankToDefault(report.getDocumentFormat(), "docx"),
             blankToDefault(report.getMediaSelectionJson(), "{}"),
             blankToDefault(report.getStructuredContextJson(), "{}"),
             Boolean.TRUE.equals(report.getRequiresHumanConfirmation()),
@@ -1253,10 +1264,10 @@ public class PatrolController {
     private SosVo toSosVo(PatrolSosEvent event) {
         return new SosVo(
             event.getSosId(),
-            "移动端警员",
-            "POLICE_9527",
-            "巡逻组 A-42",
-            "HEADSET_001",
+            "-",
+            "-",
+            "-",
+            "",
             blankToDefault(event.getAddress(), "-"),
             event.getPhase(),
             blankToDefault(event.getMessage(), "等待处置"),
@@ -1341,7 +1352,7 @@ public class PatrolController {
         if (media.getDeviceId() != null && !media.getDeviceId().isBlank()) {
             return media.getDeviceId();
         }
-        return media.getObjectKey() != null && media.getObjectKey().contains("device/") ? "HEADSET_001" : null;
+        return null;
     }
 
     private String storagePath(PatrolMedia media) {
@@ -1797,7 +1808,7 @@ public class PatrolController {
             return device == null ? blankToDefault(targetId, "-") : device.getDeviceName();
         }
         if ("ORG".equals(targetType)) {
-            return "巡逻组 A-42";
+            return blankToDefault(targetId, "-");
         }
         if ("SINGLE".equals(targetType) || "OFFICER".equals(targetType)) {
             PatrolDeviceBinding binding = activeBindingByBadgeNo(targetId);
@@ -1988,7 +1999,10 @@ public class PatrolController {
     public record CleanupResultVo(Integer cleaned, String message) {
     }
 
-    public record DailyReportVo(String reportId, String missionId, String reportType, String deviceId, String operatorId, String officerName, String model, String backend, String generatedAt, String content, String mediaSelectionJson, String structuredContextJson, Boolean requiresHumanConfirmation, String status, String submitSource) {
+    public record DailyReportVo(String reportId, String missionId, String reportType, String deviceId, String operatorId, String officerName, String model, String backend, String generatedAt, String content, String documentUri, String documentName, String documentFormat, String mediaSelectionJson, String structuredContextJson, Boolean requiresHumanConfirmation, String status, String submitSource) {
+    }
+
+    public record DailyReportContentBo(String content) {
     }
 
     public record AppVersionVo(String versionId, Integer versionCode, String versionName, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId, String status, String publishedAt) {

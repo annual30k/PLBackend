@@ -13,6 +13,7 @@ import org.dromara.patrol.entity.ApiEnvelope;
 import org.dromara.patrol.entity.AuthSessionDto;
 import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
 import org.dromara.patrol.entity.CerebellumDailyReportRequestDto;
+import org.dromara.patrol.entity.CerebellumSettingsDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
@@ -99,6 +100,16 @@ public class PatrolAppApiController {
         return ok(patrolAppService.currentUser());
     }
 
+    @GetMapping("/cerebellum/settings")
+    public ApiEnvelope<CerebellumSettingsDto> cerebellumSettings() {
+        return ok(patrolAppService.cerebellumSettings());
+    }
+
+    @PostMapping("/cerebellum/settings")
+    public ApiEnvelope<CerebellumSettingsDto> saveCerebellumSettings(@RequestBody CerebellumSettingsDto request) {
+        return ok(patrolAppService.saveCerebellumSettings(request));
+    }
+
     @GetMapping("/devices/scan")
     public ApiEnvelope<List<ScannedDeviceDto>> scanDevices() {
         return ok(patrolAppService.scanDevices());
@@ -107,6 +118,11 @@ public class PatrolAppApiController {
     @PostMapping("/devices/{deviceId}/bind")
     public ApiEnvelope<DeviceStatusDto> bindDevice(@PathVariable String deviceId) {
         return ok(patrolAppService.bindDevice(deviceId));
+    }
+
+    @PostMapping("/devices/{deviceId}/unbind")
+    public ApiEnvelope<DeviceStatusDto> unbindDevice(@PathVariable String deviceId) {
+        return ok(patrolAppService.unbindDevice(deviceId));
     }
 
     @PostMapping("/devices/{deviceId}/commands")
@@ -380,6 +396,9 @@ public class PatrolAppApiController {
         report.setBackend(request.getBackend());
         report.setGeneratedAt(parseDate(request.getGeneratedAt()));
         report.setContent(request.getContent());
+        report.setDocumentUri(request.getDocumentUri());
+        report.setDocumentName(request.getDocumentName());
+        report.setDocumentFormat(blankToDefault(request.getDocumentFormat(), "docx"));
         report.setRequiresHumanConfirmation(Boolean.TRUE.equals(request.getRequiresHumanConfirmation()));
         report.setMediaSelectionJson(toJson(request.getMediaSelection()));
         report.setStructuredContextJson(toJson(request.getStructuredContext()));

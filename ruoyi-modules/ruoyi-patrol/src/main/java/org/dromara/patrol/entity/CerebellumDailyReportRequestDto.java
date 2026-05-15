@@ -18,6 +18,9 @@ public class CerebellumDailyReportRequestDto {
     private String backend;
     private String generatedAt;
     private String content;
+    private String documentUri;
+    private String documentName;
+    private String documentFormat;
     private Boolean requiresHumanConfirmation;
     private Object mediaSelection;
     private Object structuredContext;

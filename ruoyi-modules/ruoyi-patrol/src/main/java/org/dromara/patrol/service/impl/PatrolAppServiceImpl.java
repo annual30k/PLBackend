@@ -23,6 +23,7 @@ import org.dromara.patrol.domain.PatrolAppVersion;
 import org.dromara.patrol.domain.PatrolArea;
 import org.dromara.patrol.domain.PatrolAuditLog;
 import org.dromara.patrol.domain.PatrolControlPerson;
+import org.dromara.patrol.domain.PatrolCerebellumConfig;
 import org.dromara.patrol.domain.PatrolDevice;
 import org.dromara.patrol.domain.PatrolDeviceBinding;
 import org.dromara.patrol.domain.PatrolDeviceCommand;
@@ -38,6 +39,7 @@ import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.AuthSessionDto;
 import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
+import org.dromara.patrol.entity.CerebellumSettingsDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
@@ -77,6 +79,7 @@ import org.dromara.patrol.mapper.PatrolAlertMapper;
 import org.dromara.patrol.mapper.PatrolAreaMapper;
 import org.dromara.patrol.mapper.PatrolAuditLogMapper;
 import org.dromara.patrol.mapper.PatrolControlPersonMapper;
+import org.dromara.patrol.mapper.PatrolCerebellumConfigMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
 import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
 import org.dromara.patrol.mapper.PatrolDeviceBindingMapper;
@@ -131,7 +134,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private static final String TENANT_ID = TenantConstants.DEFAULT_TENANT_ID;
     private static final String APP_CLIENT_ID = "428a8310cd442757ae699df5d894f051";
     private static final String APP_CLIENT_KEY = "app";
-    private static final String DEVICE_ID = "HEADSET_001";
+    private static final String DEFAULT_DEVICE_ID = "";
     private static final long DEFAULT_CHUNK_SIZE = 8L * 1024L * 1024L;
     private static final Duration INTERCOM_TTL = Duration.ofMinutes(30);
     private static final String INTERCOM_SESSION_PREFIX = "patrol:intercom:session:";
@@ -159,6 +162,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private final PatrolSosEventMapper sosEventMapper;
     private final PatrolAppVersionMapper appVersionMapper;
     private final PatrolControlPersonMapper controlPersonMapper;
+    private final PatrolCerebellumConfigMapper cerebellumConfigMapper;
     private final PatrolRealtimePublisher realtimePublisher;
 
     @Override
@@ -193,18 +197,55 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Override
     public UserProfileDto currentUser() {
         LoginUser loginUser = LoginHelper.getLoginUser();
+        SysUserVo user = TenantHelper.dynamic(TENANT_ID, () -> userMapper.selectVoOne(new LambdaQueryWrapper<SysUser>()
+            .eq(SysUser::getUserId, loginUser.getUserId())));
+        String name = user == null ? loginUser.getNickname() : user.getNickName();
+        String badgeNo = user == null ? loginUser.getUsername() : user.getUserName();
         return new UserProfileDto(
             String.valueOf(loginUser.getUserId()),
-            loginUser.getNickname(),
-            loginUser.getUsername(),
+            blankToDefault(name, badgeNo),
+            blankToDefault(badgeNo, loginUser.getUsername()),
             blankToDefault(loginUser.getDeptName(), "第一巡逻支队"),
+            user == null ? "" : blankToDefault(user.getPhonenumber(), ""),
+            user == null ? "" : blankToDefault(user.getEmail(), ""),
             "",
             "",
-            "福州温泉公园",
-            "05:24:12",
-            "巡逻组 A-42 | 温泉公园重点巡区",
-            "0x4F2A"
+            blankToDefault(loginUser.getDeptName(), ""),
+            ""
         );
+    }
+
+    @Override
+    public CerebellumSettingsDto cerebellumSettings() {
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        PatrolCerebellumConfig config = TenantHelper.dynamic(TENANT_ID, () -> findCerebellumConfig(loginUser.getUserId()));
+        if (config == null) {
+            return new CerebellumSettingsDto("", "");
+        }
+        return toCerebellumSettingsDto(config);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public CerebellumSettingsDto saveCerebellumSettings(CerebellumSettingsDto request) {
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            PatrolCerebellumConfig config = findCerebellumConfig(loginUser.getUserId());
+            if (config == null) {
+                config = new PatrolCerebellumConfig();
+                config.setConfigId("CER-" + UUID.randomUUID());
+                config.setTenantId(TENANT_ID);
+                config.setUserId(loginUser.getUserId());
+                config.setDelFlag("0");
+            }
+            config.setUserName(blankToDefault(loginUser.getUsername(), ""));
+            config.setBadgeNo(blankToDefault(loginUser.getUsername(), ""));
+            config.setBaseUrl(blankToDefault(request == null ? null : request.getBaseUrl(), "").trim());
+            config.setApiKey(blankToDefault(request == null ? null : request.getApiKey(), "").trim());
+            cerebellumConfigMapper.insertOrUpdate(config);
+            saveAudit("CEREBELLUM", "App保存小脑连接配置", String.valueOf(loginUser.getUserId()), "SUCCESS");
+            return toCerebellumSettingsDto(config);
+        });
     }
 
     @Override
@@ -230,6 +271,39 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             cacheDevice(device);
             realtimePublisher.publish("DEVICE_STATUS", "devices", "设备绑定上线", device.getDeviceId() + " 已绑定并在线", device.getDeviceId(),
                 realtimePublisher.payload("deviceId", device.getDeviceId(), "online", device.getOnline(), "batteryPercent", device.getBatteryPercent()));
+            return toDeviceStatus(device);
+        });
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public DeviceStatusDto unbindDevice(String deviceId) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            PatrolDevice device = getOrCreateDevice(deviceId);
+            device.setOnline(false);
+            device.setCloudConnected(false);
+            device.setRecordingStatus("IDLE");
+            device.setTalking(false);
+            device.setOnlineDuration("00:00:00");
+            deviceMapper.insertOrUpdate(device);
+
+            Date now = new Date();
+            String username = LoginHelper.getUsername();
+            deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
+                    .eq(PatrolDeviceBinding::getDeviceId, deviceId)
+                    .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                    .eq(PatrolDeviceBinding::getUserName, username))
+                .forEach(binding -> {
+                    binding.setBindStatus("UNBOUND");
+                    binding.setUnboundAt(now);
+                    binding.setRemark("App端解绑");
+                    deviceBindingMapper.updateById(binding);
+                });
+
+            saveDeviceEvent(deviceId, "UNBIND", "INFO", "设备解绑离线", device.getDeviceName() + " 已解绑并同步离线状态");
+            cacheDevice(device);
+            realtimePublisher.publish("DEVICE_STATUS", "devices", "设备解绑离线", device.getDeviceId() + " 已解绑并离线", device.getDeviceId(),
+                realtimePublisher.payload("deviceId", device.getDeviceId(), "online", device.getOnline(), "cloudConnected", device.getCloudConnected()));
             return toDeviceStatus(device);
         });
     }
@@ -805,7 +879,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Transactional(rollbackFor = Exception.class)
     public IntercomSessionDto createIntercomSession(IntercomSessionRequestDto request) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
-            String deviceId = blankToDefault(request.getDeviceId(), DEVICE_ID);
+            String deviceId = blankToDefault(request.getDeviceId(), DEFAULT_DEVICE_ID);
             PatrolDevice device = deviceMapper.selectById(deviceId);
             if (device == null) {
                 throw new ServiceException("设备不存在：" + deviceId);
@@ -836,7 +910,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
 
     @Override
     public IntercomSessionDto pendingIntercomSession(String deviceId) {
-        String sessionId = RedisUtils.getCacheObject(INTERCOM_PENDING_PREFIX + blankToDefault(deviceId, DEVICE_ID));
+        String sessionId = RedisUtils.getCacheObject(INTERCOM_PENDING_PREFIX + blankToDefault(deviceId, DEFAULT_DEVICE_ID));
         if (sessionId == null) {
             return null;
         }
@@ -938,6 +1012,9 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     public PatrolAreaDto currentPatrolArea() {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             PatrolArea area = areaMapper.selectById("AREA-FZ-WQ-001");
+            if (area == null) {
+                return new PatrolAreaDto("", "", "", "", List.of(), List.of());
+            }
             List<PatrolGeoPointDto> boundary = JsonUtils.parseArray(area.getBoundaryJson(), PatrolGeoPointDto.class);
             List<PatrolGeoPointDto> route = JsonUtils.parseArray(area.getRouteJson(), PatrolGeoPointDto.class);
             return new PatrolAreaDto(area.getAreaId(), area.getAreaName(), area.getTeamId(), area.getTeamName(), boundary, route);
@@ -1022,18 +1099,18 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 .orderByAsc(PatrolControlPerson::getControlId));
             String version = faceLibraryVersion(persons);
             if (!force && version.equals(currentVersion)) {
-                return new FaceLibraryPackageDto(version, "PLBackend", true, "opencv-zoo-yunet+sface", blankToDefault(deviceId, DEVICE_ID), true, Instant.now().toEpochMilli(), List.of());
+                return new FaceLibraryPackageDto(version, "PLBackend", true, "opencv-zoo-yunet+sface", blankToDefault(deviceId, DEFAULT_DEVICE_ID), true, Instant.now().toEpochMilli(), List.of());
             }
             List<FaceLibraryPersonDto> records = persons.stream()
                 .map(this::toFaceLibraryPerson)
                 .toList();
-            return new FaceLibraryPackageDto(version, "PLBackend", true, "opencv-zoo-yunet+sface", blankToDefault(deviceId, DEVICE_ID), false, Instant.now().toEpochMilli(), records);
+            return new FaceLibraryPackageDto(version, "PLBackend", true, "opencv-zoo-yunet+sface", blankToDefault(deviceId, DEFAULT_DEVICE_ID), false, Instant.now().toEpochMilli(), records);
         });
     }
 
     @Override
     public DeviceControlResultDto acknowledgeFaceLibrary(FaceLibraryAckRequestDto request) {
-        String deviceId = blankToDefault(request.getDeviceId(), DEVICE_ID);
+        String deviceId = blankToDefault(request.getDeviceId(), DEFAULT_DEVICE_ID);
         String message = "人脸库同步确认 version=" + blankToDefault(request.getVersion(), "-")
             + " applied=" + value(request.getApplied(), 0)
             + " pending=" + value(request.getPending(), 0)
@@ -1046,7 +1123,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Transactional(rollbackFor = Exception.class)
     public AlertDto reportCerebellumFaceAlert(CerebellumFaceAlertRequestDto request) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
-            String deviceId = blankToDefault(request.getDeviceId(), DEVICE_ID);
+            String deviceId = blankToDefault(request.getDeviceId(), DEFAULT_DEVICE_ID);
             String personId = blankToDefault(request.getPersonId(), "UNKNOWN");
             String alertId = blankToDefault(request.getAlertId(), "FACE-" + deviceId + "-" + personId + "-" + UUID.randomUUID());
             String displayName = blankToDefault(request.getDisplayName(), personId);
@@ -1145,27 +1222,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         if (device != null) {
             return device;
         }
-        device = new PatrolDevice();
-        device.setTenantId(TENANT_ID);
-        device.setDeviceId(deviceId);
-        device.setDeviceName("ForceLink-H1");
-        device.setDeviceType("HEADSET");
-        device.setServiceUuid("0000-pl2-ble-control");
-        device.setMacAddress("2C:4A:91:3F:8B:02");
-        device.setBonded(true);
-        device.setOnline(true);
-        device.setBatteryPercent(88);
-        device.setSignalBars(4);
-        device.setOnlineDuration("02:45:12");
-        device.setStorageUsedGb(42.5F);
-        device.setStorageTotalGb(128F);
-        device.setFirmwareVersion("v1.2.4");
-        device.setRecordingStatus("IDLE");
-        device.setTalking(false);
-        device.setCloudConnected(true);
-        device.setAddress("福州温泉公园");
-        device.setDelFlag("0");
-        return device;
+        throw new ServiceException("设备未注册：" + deviceId);
     }
 
     private PatrolDeviceConfig getOrCreateDeviceConfig(String deviceId) {
@@ -1225,7 +1282,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         alert.setStatus("PENDING");
         alert.setOccurredAt("15:00");
         alert.setLocationText("未知位置");
-        alert.setSource(DEVICE_ID);
+        alert.setSource(DEFAULT_DEVICE_ID);
         alert.setDescription("事件状态已更新。");
         alert.setConfidence("0%");
         alert.setDelFlag("0");
@@ -1559,7 +1616,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             .stream()
             .findFirst()
             .map(PatrolDeviceBinding::getDeviceId)
-            .orElse(DEVICE_ID);
+            .orElse(DEFAULT_DEVICE_ID);
     }
 
     private DeviceStatusDto toDeviceStatus(PatrolDevice device) {
@@ -1664,7 +1721,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     private String normalizeAccount(String account) {
-        return account == null || account.isBlank() ? "POLICE_9527" : account.trim();
+        return account == null ? "" : account.trim();
     }
 
     private String currentOperator() {

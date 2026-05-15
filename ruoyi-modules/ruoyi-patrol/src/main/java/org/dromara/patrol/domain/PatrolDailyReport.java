@@ -73,6 +73,21 @@ public class PatrolDailyReport extends TenantEntity {
     private String content;
 
     /**
+     * Word报告文件地址
+     */
+    private String documentUri;
+
+    /**
+     * Word报告文件名
+     */
+    private String documentName;
+
+    /**
+     * 报告文件格式
+     */
+    private String documentFormat;
+
+    /**
      * 媒体选择JSON
      */
     private String mediaSelectionJson;

@@ -4,6 +4,7 @@ import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.AuthSessionDto;
 import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
+import org.dromara.patrol.entity.CerebellumSettingsDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
@@ -49,9 +50,15 @@ public interface IPatrolAppService {
 
     UserProfileDto currentUser();
 
+    CerebellumSettingsDto cerebellumSettings();
+
+    CerebellumSettingsDto saveCerebellumSettings(CerebellumSettingsDto request);
+
     List<ScannedDeviceDto> scanDevices();
 
     DeviceStatusDto bindDevice(String deviceId);
+
+    DeviceStatusDto unbindDevice(String deviceId);
 
     DeviceStatusDto sendDeviceCommand(String deviceId, DeviceCommandRequestDto request);
 

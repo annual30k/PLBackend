@@ -527,95 +527,21 @@ insert ignore into sys_user values(9527, '000000', 103, 'POLICE_9527', '张警�
 insert ignore into sys_user_role values ('9527', '3');
 insert ignore into sys_user_post values ('9527', '4');
 
-insert ignore into patrol_device(device_id, tenant_id, device_name, device_type, service_uuid, mac_address, bonded, online, battery_percent, signal_bars, online_duration, storage_used_gb, storage_total_gb, firmware_version, recording_status, talking, cloud_connected, latitude, longitude, address, last_heartbeat_time, create_dept, create_by, create_time, del_flag)
-values
-('HEADSET_001', '000000', 'ForceLink-H1', 'HEADSET', '0000-pl2-ble-control', '2C:4A:91:3F:8B:02', 1, 1, 88, 4, '02:45:12', 42.5, 128, 'v1.2.4', 'IDLE', 0, 1, 26.1002000, 119.3065500, '福州温泉公园', sysdate(), 103, 1, sysdate(), '0'),
-('RECORDER_A5', '000000', 'ForceLink-A5', 'RECORDER', '0000-pl2-ble-control', '4F:02:8C:76:A1:19', 0, 0, 72, 3, '00:00:00', 12.1, 64, 'v1.0.9', 'IDLE', 0, 0, 26.1005800, 119.3077100, '福州温泉公园东门', null, 103, 1, sysdate(), '0'),
-('SENSOR_S9', '000000', 'ForceLink-S9', 'SENSOR', '0000-pl2-ble-control', '1E:BD:55:0A:44:71', 0, 0, 65, 2, '00:00:00', 2.4, 16, 'v1.1.1', 'IDLE', 0, 0, 26.1015500, 119.3090000, '核心商务区 CBD-North', null, 103, 1, sysdate(), '0'),
-('GLASSES_G1', '000000', 'ForceLink-G1', 'GLASSES', '0000-pl2-ble-control', '6B:13:9E:41:D7:50', 0, 0, 91, 4, '00:00:00', 24.8, 128, 'v1.3.0', 'IDLE', 0, 0, 26.1025500, 119.3079500, '北侧周界入口', null, 103, 1, sysdate(), '0');
-
-insert ignore into patrol_device_config(config_id, tenant_id, device_id, supports_glasses, supports_earphone, supports_wifi, supports_file_transfer, supports_photo, supports_video, supports_audio_record, supports_realtime_audio, wifi_enabled, wifi_ssid, wifi_password_configured, wifi_connected, video_width, video_height, video_frame_rate, recording_duration_seconds, vertical_recording, enhanced_sound, brightness_level, realtime_audio_syncing, create_dept, create_by, create_time, del_flag)
-values
-('CFG-HEADSET-001', '000000', 'HEADSET_001', 0, 1, 0, 1, 1, 1, 1, 1, 0, '', 0, 0, 240, 0, 16, 86400, 1, 1, 2, 0, 103, 1, sysdate(), '0'),
-('CFG-GLASSES-001', '000000', 'GLASSES_G1', 1, 0, 1, 1, 1, 1, 0, 0, 1, 'PatrolLink-Device', 0, 1, 240, 0, 16, 86400, 1, 1, 2, 0, 103, 1, sysdate(), '0');
-
-insert ignore into patrol_app_version(version_id, tenant_id, version_code, version_name, force_update, changelog, download_url, sha256, file_id, status, published_at, create_dept, create_by, create_time, del_flag)
-values
-('VER-ANDROID-125', '000000', 2, '1.2.5', 0, '对接平台端媒体上传\n对接设备高级能力与版本检查\n优化巡检消息与告警闭环', 'https://example.test/patrollink/PatrolLink-1.2.5.apk', null, null, 'PUBLISHED', sysdate(), 103, 1, sysdate(), '0');
-
-insert ignore into patrol_device_binding(binding_id, tenant_id, device_id, user_id, user_name, nick_name, dept_id, dept_name, badge_no, bind_status, bound_at, remark, create_dept, create_by, create_time, del_flag)
-values
-('BIND-SEED-001', '000000', 'HEADSET_001', 9527, 'POLICE_9527', '张警官', 103, '巡逻组 A-42', 'POLICE_9527', 'BOUND', sysdate(), '初始化绑定', 103, 1, sysdate(), '0');
-update patrol_device_binding set dept_name = '巡逻组 A-42' where binding_id = 'BIND-SEED-001';
-
-insert ignore into patrol_alert(alert_id, tenant_id, title, level, status, occurred_at, location_text, source, description, confidence, create_dept, create_by, create_time, del_flag)
-values
-('AL-99824-03', '000000', '非法侵入监测', 'CRITICAL', 'PENDING', '14:32', '西三区 4号围墙 节点B', 'CAM-042', '围墙节点 B 检测到人员越界，耳机端已同步 12 秒现场视频片段。', '98.4%', 103, 1, sysdate(), '0'),
-('AL-99824-04', '000000', '未识别车辆靠近', 'WARNING', 'PENDING', '14:38', '北侧周界入口', 'RFID-09', '车牌识别失败，建议现场复核并记录车辆去向。', '91.2%', 103, 1, sysdate(), '0'),
-('AL-99821-11', '000000', '夜间巡查异常声源', 'INFO', 'CLOSED', '13:22', '核心商务区 CBD-North', 'HEADSET_001', '环境音频超过阈值，现场确认无风险。', '74.8%', 103, 1, sysdate(), '0');
-
-insert ignore into patrol_alert_attachment(attachment_id, tenant_id, alert_id, client_file_id, file_name, mime_type, size_bytes, source, local_uri, upload_intent, create_dept, create_by, create_time, del_flag)
-values
-('ATT-SEED-001', '000000', 'AL-99821-11', 'AUD-318', '现场确认录音.m4a', 'audio/mp4', 9017753, 'AUDIO', 'device://AUD-318', 'ALERT_CLOSE', 103, 1, sysdate(), '0');
-
-insert ignore into patrol_alert_disposition(disposition_id, tenant_id, alert_id, action_type, action_result, operator_id, operator_name, note, attachments_count, occurred_at, create_dept, create_by, create_time, del_flag)
-values
-('AD-SEED-001', '000000', 'AL-99821-11', 'CLOSE', 'RESOLVED', 'admin', 'admin', '现场确认无风险，已闭环。', 1, date_sub(sysdate(), interval 1 hour), 103, 1, sysdate(), '0');
-
-insert ignore into patrol_media(media_id, tenant_id, file_id, file_name, media_type, captured_at, size_text, duration_text, sha256_verified, storage_side, transfer_status, progress, bucket_name, object_key, create_dept, create_by, create_time, del_flag)
-values
-(190000000000000001, '000000', 'VID-042', 'CAM_04_A', 'VIDEO', '14:22:05', '84.1 MB', '04:12', 1, 'DEVICE', 'IDLE', 0, 'patrol-media', 'device/VID-042', 103, 1, sysdate(), '0'),
-(190000000000000002, '000000', 'IMG-8821', 'IMG_8821', 'PHOTO', '14:45:12', '2.4 MB', null, 1, 'DEVICE', 'DONE', 1, 'patrol-media', 'device/IMG-8821', 103, 1, sysdate(), '0'),
-(190000000000000003, '000000', 'AUD-318', 'VOICE_318', 'AUDIO', '14:50:02', '8.6 MB', '03:55', 1, 'PHONE', 'IDLE', 0, 'patrol-evidence', 'phone/AUD-318', 103, 1, sysdate(), '0'),
-(190000000000000004, '000000', 'VID-051', 'PATROL_051', 'VIDEO', '15:02:18', '126 MB', '08:12', 0, 'PHONE', 'IDLE', 0, 'patrol-evidence', 'phone/VID-051', 103, 1, sysdate(), '0');
-
-insert ignore into patrol_area(area_id, tenant_id, area_name, team_id, team_name, boundary_json, route_json, create_dept, create_by, create_time, del_flag)
-values ('AREA-FZ-WQ-001', '000000', '福州温泉公园重点巡区', 'TEAM-A-42', '巡逻组 A-42',
-'[{"latitude":26.10295,"longitude":119.30485},{"latitude":26.10335,"longitude":119.31010},{"latitude":26.10020,"longitude":119.31115},{"latitude":26.09795,"longitude":119.30910},{"latitude":26.09815,"longitude":119.30465}]',
-'[{"latitude":26.09875,"longitude":119.30495},{"latitude":26.10020,"longitude":119.30655},{"latitude":26.10058,"longitude":119.30771},{"latitude":26.10155,"longitude":119.30900},{"latitude":26.10255,"longitude":119.30795}]',
-103, 1, sysdate(), '0');
-
-insert ignore into patrol_location_track(track_id, tenant_id, badge_no, officer_name, device_id, latitude, longitude, accuracy_meters, address, reported_at, create_dept, create_by, create_time, del_flag)
-values
-('TRK-SEED-001', '000000', 'POLICE_9527', '张警官', 'HEADSET_001', 26.0987500, 119.3049500, 8.5, '福州温泉公园巡区入口', date_sub(sysdate(), interval 24 minute), 103, 1, sysdate(), '0'),
-('TRK-SEED-002', '000000', 'POLICE_9527', '张警官', 'HEADSET_001', 26.1002000, 119.3065500, 7.2, '福州温泉公园', date_sub(sysdate(), interval 16 minute), 103, 1, sysdate(), '0'),
-('TRK-SEED-003', '000000', 'POLICE_9527', '张警官', 'HEADSET_001', 26.1005800, 119.3077100, 6.9, '福州温泉公园东门', date_sub(sysdate(), interval 8 minute), 103, 1, sysdate(), '0');
-
-insert ignore into patrol_device_command(command_id, tenant_id, device_id, command, operator_id, request_id, status, result_message, sent_at, ack_at, create_dept, create_by, create_time, del_flag)
-values
-('CMD-SEED-001', '000000', 'HEADSET_001', 'START_RECORD', 'admin', 'seed-001', 'ACKED', '端侧已进入录制状态', date_sub(sysdate(), interval 18 minute), date_sub(sysdate(), interval 17 minute), 103, 1, sysdate(), '0'),
-('CMD-SEED-002', '000000', 'HEADSET_001', 'TAKE_PHOTO', 'admin', 'seed-002', 'ACCEPTED', '指令已写入，等待端侧回执', date_sub(sysdate(), interval 5 minute), null, 103, 1, sysdate(), '0');
-
-insert ignore into patrol_device_event(event_id, tenant_id, device_id, event_type, event_level, event_title, event_detail, occurred_at, create_dept, create_by, create_time, del_flag)
-values
-('EVT-SEED-001', '000000', 'HEADSET_001', 'BIND', 'INFO', '设备绑定上线', 'HEADSET_001 已完成绑定并保持云端连接', date_sub(sysdate(), interval 22 minute), 103, 1, sysdate(), '0'),
-('EVT-SEED-002', '000000', 'HEADSET_001', 'COMMAND', 'INFO', '平台下发设备指令', 'START_RECORD', date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
-('EVT-SEED-003', '000000', 'HEADSET_001', 'COMMAND', 'INFO', '平台下发设备指令', 'TAKE_PHOTO', date_sub(sysdate(), interval 5 minute), 103, 1, sysdate(), '0');
-
-insert ignore into patrol_message(message_id, tenant_id, title, content, target_type, target_id, target_name, channel, status, read_count, total_count, sent_at, create_dept, create_by, create_time, del_flag)
-values
-('MSG-001', '000000', '现场支援', '请前往温泉公园北侧入口支援未识别车辆复核。', 'SINGLE', 'POLICE_9527', '张警官', 'APP', 'READ', 1, 1, date_sub(sysdate(), interval 30 minute), 103, 1, sysdate(), '0'),
-('MSG-002', '000000', '重点预警升级', '重点人员预警升级，注意联动盘查并上传现场照片。', 'ORG', 'TEAM-A-42', '巡逻组 A-42', 'APP', 'SENT', 0, 1, date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
-('MSG-003', '000000', '设备电量提醒', '设备低电量，请更换备用设备并保持心跳在线。', 'DEVICE', 'HEADSET_001', 'ForceLink-H1', 'APP', 'SENT', 0, 1, date_sub(sysdate(), interval 9 minute), 103, 1, sysdate(), '0');
-
-insert ignore into patrol_message_receipt(receipt_id, tenant_id, message_id, recipient_id, recipient_name, device_id, delivery_status, delivered_at, read_at, last_pull_at, create_dept, create_by, create_time, del_flag)
-values
-('MR-001', '000000', 'MSG-001', 'POLICE_9527', '张警官', 'HEADSET_001', 'READ', date_sub(sysdate(), interval 29 minute), date_sub(sysdate(), interval 28 minute), date_sub(sysdate(), interval 29 minute), 103, 1, sysdate(), '0'),
-('MR-002', '000000', 'MSG-002', 'POLICE_9527', '张警官', 'HEADSET_001', 'PENDING', null, null, null, 103, 1, sysdate(), '0'),
-('MR-003', '000000', 'MSG-003', 'POLICE_9527', '张警官', 'HEADSET_001', 'PENDING', null, null, null, 103, 1, sysdate(), '0');
-
-insert ignore into patrol_control_person(control_id, tenant_id, name, category, id_card_no, risk_level, status, source, expires_at, remark, create_dept, create_by, create_time, del_flag)
-values
-('CP-001', '000000', '李某某', '重点关注', null, 'HIGH', 'ENABLED', '第三方重点人员库', '2026-06-30 23:59:59', '人脸比对命中后转预警', 103, 1, sysdate(), '0'),
-('CP-002', '000000', '王某某', '临控人员', null, 'MEDIUM', 'ENABLED', '平台导入', '2026-05-31 23:59:59', '巡区临时布控', 103, 1, sysdate(), '0');
-
-insert ignore into patrol_control_vehicle(control_id, tenant_id, plate_no, vehicle_desc, vehicle_type, risk_level, status, source, expires_at, remark, create_dept, create_by, create_time, del_flag)
-values
-('CV-001', '000000', '京A12345', '黑色 SUV', 'SUV', 'HIGH', 'ENABLED', '第三方重点车辆库', '2026-06-30 23:59:59', '车牌 OCR 命中后转预警', 103, 1, sysdate(), '0'),
-('CV-002', '000000', '京B67890', '白色轿车', 'SEDAN', 'MEDIUM', 'DISABLED', '平台录入', '2026-05-31 23:59:59', '人工登记车辆', 103, 1, sysdate(), '0');
-
-insert ignore into patrol_audit_log(log_id, tenant_id, log_type, operator_name, action, resource, result, ip_address, trace_id, occurred_at, create_dept, create_by, create_time, del_flag)
-values
-('AUD-001', '000000', 'COMMAND', 'admin', '下发录制指令', 'HEADSET_001', 'SUCCESS', '127.0.0.1', 'seed-command-001', date_sub(sysdate(), interval 18 minute), 103, 1, sysdate(), '0'),
-('AUD-002', '000000', 'ALERT', 'admin', '确认预警', 'AL-99824-04', 'SUCCESS', '127.0.0.1', 'seed-alert-001', date_sub(sysdate(), interval 12 minute), 103, 1, sysdate(), '0'),
-('AUD-003', '000000', 'MESSAGE', 'admin', '发送指挥消息', 'MSG-002', 'SUCCESS', '127.0.0.1', 'seed-message-001', date_sub(sysdate(), interval 9 minute), 103, 1, sysdate(), '0');
+insert ignore into patrol_media (
+    media_id, tenant_id, file_id, file_name, media_type, captured_at, size_text, file_size_bytes, mime_type,
+    duration_text, sha256_verified, storage_side, transfer_status, progress, content_uri, bucket_name, object_key,
+    sha256, watermark_token, badge_no, officer_name, device_id, biz_type, biz_id, evidence_source,
+    create_dept, create_by, create_time, del_flag
+) values
+    (95270001, '000000', 'SEED-ZHANG-VIDEO-20260515', '张警官_商业街巡逻视频_20260515.mp4', 'VIDEO', '09:18:32', '37.8 KB', 38695, 'video/mp4',
+     '00:03', 1, 'PHONE', 'DONE', 1, '/files/SEED-ZHANG-VIDEO-20260515/download', 'patrol-samples', 'classpath:patrol-samples/zhang-duty-video.mp4',
+     '987a0de57d266af646a014f8b4e77c964ccfbf5fdf07858e8ff6ad766579e827', 'wm-seed-zhang-video-20260515', 'POLICE_9527', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-POLICE_9527-20260515', 'SEED_SAMPLE',
+     103, 9527, sysdate(), '0'),
+    (95270002, '000000', 'SEED-ZHANG-AUDIO-20260515', '张警官_现场询问录音_20260515.wav', 'AUDIO', '10:42:08', '344.6 KB', 352878, 'audio/wav',
+     '00:04', 1, 'PHONE', 'DONE', 1, '/files/SEED-ZHANG-AUDIO-20260515/download', 'patrol-samples', 'classpath:patrol-samples/zhang-duty-audio.wav',
+     '444757312b89160cefae137c2e95571ba26211b03ec58def3756a03837942765', 'wm-seed-zhang-audio-20260515', 'POLICE_9527', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-POLICE_9527-20260515', 'SEED_SAMPLE',
+     103, 9527, sysdate(), '0'),
+    (95270003, '000000', 'SEED-ZHANG-PHOTO-20260515', '张警官_重点点位照片_20260515.jpg', 'PHOTO', '14:06:25', '19.3 KB', 19736, 'image/jpeg',
+     null, 1, 'PHONE', 'DONE', 1, '/files/SEED-ZHANG-PHOTO-20260515/download', 'patrol-samples', 'classpath:patrol-samples/zhang-duty-photo.jpg',
+     'fe3036243614d7cd3148b42e6637e618910714d931a5d2d5c120ea4c63bc8105', 'wm-seed-zhang-photo-20260515', 'POLICE_9527', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-POLICE_9527-20260515', 'SEED_SAMPLE',
+     103, 9527, sysdate(), '0');

@@ -18,6 +18,7 @@ import org.dromara.patrol.service.CerebellumAccessGuard;
 import org.dromara.system.domain.vo.SysOssVo;
 import org.dromara.system.service.ISysOssService;
 import org.springframework.http.MediaType;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -29,6 +30,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
@@ -47,6 +49,7 @@ import java.util.UUID;
 public class PatrolFileController {
 
     private static final long RESPONSE_TIME = 1715832000L;
+    private static final String SAMPLE_PREFIX = "classpath:patrol-samples/";
 
     private final PatrolMediaMapper mediaMapper;
     private final ISysOssService ossService;
@@ -111,12 +114,33 @@ public class PatrolFileController {
             ossService.download(media.getOssId(), response);
             return;
         }
+        if (StringUtils.isNotBlank(media.getObjectKey()) && media.getObjectKey().startsWith(SAMPLE_PREFIX)) {
+            writeClasspathSample(media, response);
+            return;
+        }
         byte[] placeholder = ("PatrolLink evidence placeholder for " + fileId + "\n").getBytes(StandardCharsets.UTF_8);
         response.setStatus(HttpServletResponse.SC_OK);
         response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
         response.setHeader("Content-Disposition", "attachment; filename=\"" + fileId + ".bin\"");
         response.setContentLength(placeholder.length);
         response.getOutputStream().write(placeholder);
+    }
+
+    private void writeClasspathSample(PatrolMedia media, HttpServletResponse response) throws IOException {
+        String resourcePath = media.getObjectKey().substring(SAMPLE_PREFIX.length());
+        ClassPathResource resource = new ClassPathResource("patrol-samples/" + resourcePath);
+        if (!resource.exists()) {
+            throw new ServiceException("样例媒体文件不存在：" + resourcePath);
+        }
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.setContentType(StringUtils.blankToDefault(media.getMimeType(), MediaType.APPLICATION_OCTET_STREAM_VALUE));
+        response.setHeader("Content-Disposition", "attachment; filename=\"" + media.getFileName() + "\"");
+        if (media.getFileSizeBytes() != null) {
+            response.setContentLengthLong(media.getFileSizeBytes());
+        }
+        try (InputStream input = resource.getInputStream(); OutputStream output = response.getOutputStream()) {
+            input.transferTo(output);
+        }
     }
 
     @DeleteMapping("/{fileId}")
