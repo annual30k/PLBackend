@@ -1,6 +1,8 @@
 package org.dromara.patrol.controller;
 
 import cn.dev33.satoken.annotation.SaIgnore;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
@@ -36,6 +38,7 @@ import org.dromara.patrol.entity.StreamRelayStateDto;
 import org.dromara.patrol.entity.TransferRequestDto;
 import org.dromara.patrol.entity.UserProfileDto;
 import org.dromara.patrol.entity.VersionCheckDto;
+import org.dromara.patrol.service.CerebellumAccessGuard;
 import org.dromara.patrol.service.IPatrolAppService;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -64,6 +67,7 @@ public class PatrolAppApiController {
     private static final long RESPONSE_TIME = 1715832000L;
 
     private final IPatrolAppService patrolAppService;
+    private final CerebellumAccessGuard cerebellumAccessGuard;
 
     @SaIgnore
     @PostMapping("/auth/login")
@@ -301,25 +305,47 @@ public class PatrolAppApiController {
     @SaIgnore
     @GetMapping("/cerebellum/face-library")
     public ApiEnvelope<FaceLibraryPackageDto> faceLibraryPackage(
+        HttpServletRequest request,
+        HttpServletResponse response,
         @RequestParam(required = false) String deviceId,
         @RequestParam(required = false) String currentVersion,
         @RequestParam(defaultValue = "false") boolean force) {
+        if (!cerebellumAccessGuard.isAllowed(request)) {
+            return unauthorized(response);
+        }
         return ok(patrolAppService.faceLibraryPackage(deviceId, currentVersion, force));
     }
 
     @SaIgnore
     @PostMapping("/cerebellum/face-library/ack")
-    public ApiEnvelope<DeviceControlResultDto> acknowledgeFaceLibrary(@RequestBody FaceLibraryAckRequestDto request) {
+    public ApiEnvelope<DeviceControlResultDto> acknowledgeFaceLibrary(
+        HttpServletRequest httpRequest,
+        HttpServletResponse response,
+        @RequestBody FaceLibraryAckRequestDto request) {
+        if (!cerebellumAccessGuard.isAllowed(httpRequest)) {
+            return unauthorized(response);
+        }
         return ok(patrolAppService.acknowledgeFaceLibrary(request));
     }
 
     @SaIgnore
     @PostMapping("/cerebellum/face-alerts")
-    public ApiEnvelope<AlertDto> reportCerebellumFaceAlert(@RequestBody CerebellumFaceAlertRequestDto request) {
+    public ApiEnvelope<AlertDto> reportCerebellumFaceAlert(
+        HttpServletRequest httpRequest,
+        HttpServletResponse response,
+        @RequestBody CerebellumFaceAlertRequestDto request) {
+        if (!cerebellumAccessGuard.isAllowed(httpRequest)) {
+            return unauthorized(response);
+        }
         return ok(patrolAppService.reportCerebellumFaceAlert(request));
     }
 
     private <T> ApiEnvelope<T> ok(T data) {
         return new ApiEnvelope<>(200, "OK", data, UUID.randomUUID().toString(), RESPONSE_TIME);
+    }
+
+    private <T> ApiEnvelope<T> unauthorized(HttpServletResponse response) {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        return new ApiEnvelope<>(401, "Unauthorized", null, UUID.randomUUID().toString(), RESPONSE_TIME);
     }
 }

@@ -3,6 +3,8 @@ package org.dromara.patrol.controller;
 import cn.hutool.core.util.IdUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import cn.dev33.satoken.annotation.SaIgnore;
+import cn.dev33.satoken.stp.StpUtil;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.exception.ServiceException;
@@ -12,6 +14,7 @@ import org.dromara.patrol.domain.PatrolMedia;
 import org.dromara.patrol.entity.ApiEnvelope;
 import org.dromara.patrol.entity.MediaFileDto;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
+import org.dromara.patrol.service.CerebellumAccessGuard;
 import org.dromara.system.domain.vo.SysOssVo;
 import org.dromara.system.service.ISysOssService;
 import org.springframework.http.MediaType;
@@ -47,6 +50,7 @@ public class PatrolFileController {
 
     private final PatrolMediaMapper mediaMapper;
     private final ISysOssService ossService;
+    private final CerebellumAccessGuard cerebellumAccessGuard;
 
     @GetMapping
     public ApiEnvelope<List<MediaFileDto>> listDeviceFiles() {
@@ -97,7 +101,11 @@ public class PatrolFileController {
 
     @SaIgnore
     @GetMapping("/{fileId}/download")
-    public void download(@PathVariable String fileId, HttpServletResponse response) throws IOException {
+    public void download(@PathVariable String fileId, HttpServletRequest request, HttpServletResponse response) throws IOException {
+        if (!cerebellumAccessGuard.isAllowed(request) && !isLoggedIn()) {
+            response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
+            return;
+        }
         PatrolMedia media = findMedia(fileId);
         if (media.getOssId() != null) {
             ossService.download(media.getOssId(), response);
@@ -140,6 +148,14 @@ public class PatrolFileController {
             throw new ServiceException("媒体文件不存在");
         }
         return media;
+    }
+
+    private boolean isLoggedIn() {
+        try {
+            return StpUtil.isLogin();
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private MediaFileDto toMediaDto(PatrolMedia media) {

@@ -903,6 +903,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         RedisUtils.getClient().getList(INTERCOM_SIGNAL_PREFIX + sessionId).expire(INTERCOM_TTL);
         if ("hangup".equalsIgnoreCase(signal.getType())) {
             closeIntercomSession(sessionId);
+        } else if ("answer".equalsIgnoreCase(signal.getType())) {
+            session.setState("ACTIVE");
+            session.setMessage("WebRTC 音频流已建立");
+            saveIntercomSession(session);
         } else if (!"ACTIVE".equals(session.getState())) {
             session.setState("SIGNALING");
             session.setMessage("WebRTC 信令交换中");
