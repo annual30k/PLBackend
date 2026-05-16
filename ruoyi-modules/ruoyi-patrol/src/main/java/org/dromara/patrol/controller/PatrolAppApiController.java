@@ -22,6 +22,11 @@ import org.dromara.patrol.entity.DeviceStatusDto;
 import org.dromara.patrol.entity.DeviceWifiStateDto;
 import org.dromara.patrol.entity.FaceLibraryAckRequestDto;
 import org.dromara.patrol.entity.FaceLibraryPackageDto;
+import org.dromara.patrol.entity.FirmwareCheckDto;
+import org.dromara.patrol.entity.FirmwareCheckRequestDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskCreateDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskUpdateDto;
 import org.dromara.patrol.entity.GpsLocationDto;
 import org.dromara.patrol.entity.HeartbeatAckDto;
 import org.dromara.patrol.entity.HeartbeatRequestDto;
@@ -330,6 +335,21 @@ public class PatrolAppApiController {
     @GetMapping("/version/check")
     public ApiEnvelope<VersionCheckDto> checkVersion(@RequestParam(defaultValue = "1") int currentVersionCode) {
         return ok(patrolAppService.checkVersion(currentVersionCode));
+    }
+
+    @PostMapping("/devices/{deviceId}/firmware/check")
+    public ApiEnvelope<FirmwareCheckDto> checkFirmware(@PathVariable String deviceId, @RequestBody FirmwareCheckRequestDto request) {
+        return ok(patrolAppService.checkFirmware(deviceId, request));
+    }
+
+    @PostMapping("/devices/{deviceId}/firmware/upgrade-tasks")
+    public ApiEnvelope<FirmwareUpgradeTaskDto> createFirmwareUpgradeTask(@PathVariable String deviceId, @RequestBody FirmwareUpgradeTaskCreateDto request) {
+        return ok(patrolAppService.createFirmwareUpgradeTask(deviceId, request));
+    }
+
+    @PostMapping("/firmware/upgrade-tasks/{taskId}")
+    public ApiEnvelope<FirmwareUpgradeTaskDto> updateFirmwareUpgradeTask(@PathVariable String taskId, @RequestBody FirmwareUpgradeTaskUpdateDto request) {
+        return ok(patrolAppService.updateFirmwareUpgradeTask(taskId, request));
     }
 
     @SaIgnore

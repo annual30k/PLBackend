@@ -26,6 +26,8 @@ import org.dromara.patrol.domain.PatrolDeviceBinding;
 import org.dromara.patrol.domain.PatrolDeviceCommand;
 import org.dromara.patrol.domain.PatrolDeviceConfig;
 import org.dromara.patrol.domain.PatrolDeviceEvent;
+import org.dromara.patrol.domain.PatrolFirmwareUpgradeTask;
+import org.dromara.patrol.domain.PatrolFirmwareVersion;
 import org.dromara.patrol.domain.PatrolLocationTrack;
 import org.dromara.patrol.domain.PatrolMedia;
 import org.dromara.patrol.domain.PatrolMediaUploadTask;
@@ -55,6 +57,8 @@ import org.dromara.patrol.mapper.PatrolDeviceBindingMapper;
 import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
 import org.dromara.patrol.mapper.PatrolDeviceConfigMapper;
 import org.dromara.patrol.mapper.PatrolDeviceEventMapper;
+import org.dromara.patrol.mapper.PatrolFirmwareUpgradeTaskMapper;
+import org.dromara.patrol.mapper.PatrolFirmwareVersionMapper;
 import org.dromara.patrol.mapper.PatrolLocationTrackMapper;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
 import org.dromara.patrol.mapper.PatrolMediaUploadTaskMapper;
@@ -146,6 +150,8 @@ public class PatrolController {
     private final PatrolDailyReportMapper dailyReportMapper;
     private final PatrolDeviceBindingMapper deviceBindingMapper;
     private final PatrolAppVersionMapper appVersionMapper;
+    private final PatrolFirmwareVersionMapper firmwareVersionMapper;
+    private final PatrolFirmwareUpgradeTaskMapper firmwareUpgradeTaskMapper;
     private final PatrolDeviceConfigMapper deviceConfigMapper;
     private final IPatrolAppService patrolAppService;
     private final PatrolRealtimePublisher realtimePublisher;
@@ -619,6 +625,116 @@ public class PatrolController {
             logAudit("VERSION", "更新App版本状态：" + bo.status(), versionId, "SUCCESS");
         }
         return R.ok(version == null ? null : toAppVersionVo(version));
+    }
+
+    @GetMapping("/firmware-versions")
+    public R<List<FirmwareVersionVo>> firmwareVersions() {
+        return R.ok(firmwareVersionMapper.selectList(new LambdaQueryWrapper<PatrolFirmwareVersion>()
+                .orderByDesc(PatrolFirmwareVersion::getVersionCode))
+            .stream()
+            .map(this::toFirmwareVersionVo)
+            .toList());
+    }
+
+    @PostMapping(value = "/firmware-versions/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public R<FirmwarePackageVo> uploadFirmwarePackage(@RequestPart("file") MultipartFile file) {
+        String fileName = blankToDefault(file.getOriginalFilename(), "firmware.bin");
+        String lower = fileName.toLowerCase();
+        if (!lower.endsWith(".bin") && !lower.endsWith(".zip") && !lower.endsWith(".ufw")) {
+            throw new ServiceException("仅支持上传 bin/zip/ufw 固件包");
+        }
+        String sha256 = sha256(file);
+        SysOssVo oss = ossService.upload(file);
+        String fileId = "FILE-" + oss.getOssId();
+        String downloadUrl = "/files/" + fileId + "/download";
+        PatrolMedia media = new PatrolMedia();
+        media.setMediaId(IdUtil.getSnowflakeNextId());
+        media.setTenantId(currentTenantId());
+        media.setFileId(fileId);
+        media.setFileName(fileName);
+        media.setMediaType("FIRMWARE");
+        media.setCapturedAt(formatDate(new Date()));
+        media.setSizeText(sizeText(file.getSize()));
+        media.setFileSizeBytes(file.getSize());
+        media.setMimeType(blankToDefault(file.getContentType(), "application/octet-stream"));
+        media.setSha256Verified(true);
+        media.setStorageSide("FIRMWARE_VERSION");
+        media.setTransferStatus("DONE");
+        media.setProgress(1F);
+        media.setContentUri(downloadUrl);
+        media.setOssId(oss.getOssId());
+        media.setBucketName("ruoyi");
+        media.setObjectKey(oss.getFileName());
+        media.setSha256(sha256);
+        media.setBizType("FIRMWARE_VERSION");
+        media.setBizId(fileId);
+        media.setEvidenceSource("FIRMWARE_PACKAGE");
+        media.setDelFlag("0");
+        mediaMapper.insert(media);
+        logAudit("FIRMWARE", "上传设备固件包", fileName, "SUCCESS");
+        return R.ok(new FirmwarePackageVo(fileId, fileName, downloadUrl, sha256, file.getSize(), sizeText(file.getSize()), packageFormat(fileName)));
+    }
+
+    @PostMapping("/firmware-versions")
+    public R<FirmwareVersionVo> createFirmwareVersion(@RequestBody FirmwareVersionBo bo) {
+        PatrolMedia packageFile = bo.fileId() == null || bo.fileId().isBlank() ? null : mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
+            .eq(PatrolMedia::getFileId, bo.fileId())
+            .eq(PatrolMedia::getStorageSide, "FIRMWARE_VERSION")
+            .orderByDesc(PatrolMedia::getCreateTime)
+            .last("limit 1"));
+        PatrolFirmwareVersion firmware = new PatrolFirmwareVersion();
+        firmware.setFirmwareId("FW-" + UUID.randomUUID());
+        firmware.setTenantId(currentTenantId());
+        firmware.setDeviceType(blankToDefault(bo.deviceType(), "HEADSET"));
+        firmware.setVendor(blankToDefault(bo.vendor(), ""));
+        firmware.setChipset(blankToDefault(bo.chipset(), ""));
+        firmware.setDeviceModel(blankToDefault(bo.deviceModel(), ""));
+        firmware.setHardwareVersion(blankToDefault(bo.hardwareVersion(), ""));
+        firmware.setFirmwareType(blankToDefault(bo.firmwareType(), "FULL"));
+        firmware.setVersionCode(value(bo.versionCode(), 1));
+        firmware.setVersionName(blankToDefault(bo.versionName(), ""));
+        firmware.setMinCurrentVersion(blankToDefault(bo.minCurrentVersion(), ""));
+        firmware.setMaxCurrentVersion(blankToDefault(bo.maxCurrentVersion(), ""));
+        firmware.setForceUpdate(Boolean.TRUE.equals(bo.forceUpdate()));
+        firmware.setChangelog(blankToDefault(bo.changelog(), ""));
+        firmware.setDownloadUrl(blankToDefault(bo.downloadUrl(), packageFile == null ? "" : blankToDefault(packageFile.getContentUri(), "/files/" + packageFile.getFileId() + "/download")));
+        firmware.setSha256(blankToDefault(bo.sha256(), packageFile == null ? "" : packageFile.getSha256()));
+        firmware.setFileId(bo.fileId());
+        firmware.setFileSizeBytes(packageFile == null ? bo.fileSizeBytes() : packageFile.getFileSizeBytes());
+        firmware.setPackageFormat(blankToDefault(bo.packageFormat(), packageFile == null ? "" : packageFormat(packageFile.getFileName())));
+        firmware.setUpgradeMode(blankToDefault(bo.upgradeMode(), "APP_BLE"));
+        firmware.setGrayScope(blankToDefault(bo.grayScope(), "ALL"));
+        firmware.setGrayTargets(blankToDefault(bo.grayTargets(), ""));
+        firmware.setStatus("PUBLISHED");
+        firmware.setPublishedAt(new Date());
+        firmware.setRemark(blankToDefault(bo.remark(), ""));
+        firmware.setDelFlag("0");
+        firmwareVersionMapper.insert(firmware);
+        logAudit("FIRMWARE", "新增设备固件版本", firmware.getVersionName(), "SUCCESS");
+        return R.ok(toFirmwareVersionVo(firmware));
+    }
+
+    @PatchMapping("/firmware-versions/{firmwareId}/status")
+    public R<FirmwareVersionVo> updateFirmwareVersionStatus(@PathVariable String firmwareId, @RequestBody StatusBo bo) {
+        PatrolFirmwareVersion firmware = firmwareVersionMapper.selectById(firmwareId);
+        if (firmware != null) {
+            firmware.setStatus(bo.status());
+            if ("PUBLISHED".equals(bo.status())) {
+                firmware.setPublishedAt(new Date());
+            }
+            firmwareVersionMapper.updateById(firmware);
+            logAudit("FIRMWARE", "更新设备固件状态：" + bo.status(), firmwareId, "SUCCESS");
+        }
+        return R.ok(firmware == null ? null : toFirmwareVersionVo(firmware));
+    }
+
+    @GetMapping("/firmware-upgrade-tasks")
+    public R<List<FirmwareUpgradeTaskVo>> firmwareUpgradeTasks() {
+        return R.ok(firmwareUpgradeTaskMapper.selectList(new LambdaQueryWrapper<PatrolFirmwareUpgradeTask>()
+                .orderByDesc(PatrolFirmwareUpgradeTask::getStartedAt))
+            .stream()
+            .map(this::toFirmwareUpgradeTaskVo)
+            .toList());
     }
 
     @GetMapping("/sos")
@@ -1261,6 +1377,52 @@ public class PatrolController {
         );
     }
 
+    private FirmwareVersionVo toFirmwareVersionVo(PatrolFirmwareVersion firmware) {
+        return new FirmwareVersionVo(
+            firmware.getFirmwareId(),
+            blankToDefault(firmware.getDeviceType(), ""),
+            blankToDefault(firmware.getVendor(), ""),
+            blankToDefault(firmware.getChipset(), ""),
+            blankToDefault(firmware.getDeviceModel(), ""),
+            blankToDefault(firmware.getHardwareVersion(), ""),
+            blankToDefault(firmware.getFirmwareType(), ""),
+            firmware.getVersionCode(),
+            blankToDefault(firmware.getVersionName(), ""),
+            blankToDefault(firmware.getMinCurrentVersion(), ""),
+            blankToDefault(firmware.getMaxCurrentVersion(), ""),
+            Boolean.TRUE.equals(firmware.getForceUpdate()),
+            blankToDefault(firmware.getChangelog(), ""),
+            blankToDefault(firmware.getDownloadUrl(), ""),
+            blankToDefault(firmware.getSha256(), ""),
+            blankToDefault(firmware.getFileId(), ""),
+            value(firmware.getFileSizeBytes(), 0L),
+            blankToDefault(firmware.getPackageFormat(), ""),
+            blankToDefault(firmware.getUpgradeMode(), "APP_BLE"),
+            blankToDefault(firmware.getGrayScope(), "ALL"),
+            blankToDefault(firmware.getGrayTargets(), ""),
+            blankToDefault(firmware.getStatus(), "DRAFT"),
+            formatDate(firmware.getPublishedAt()),
+            blankToDefault(firmware.getRemark(), "")
+        );
+    }
+
+    private FirmwareUpgradeTaskVo toFirmwareUpgradeTaskVo(PatrolFirmwareUpgradeTask task) {
+        return new FirmwareUpgradeTaskVo(
+            task.getTaskId(),
+            task.getDeviceId(),
+            task.getFirmwareId(),
+            blankToDefault(task.getOperatorId(), ""),
+            blankToDefault(task.getFromVersion(), ""),
+            blankToDefault(task.getToVersion(), ""),
+            blankToDefault(task.getStatus(), "PENDING"),
+            value(task.getProgress()),
+            blankToDefault(task.getErrorCode(), ""),
+            blankToDefault(task.getErrorMessage(), ""),
+            formatDate(task.getStartedAt()),
+            formatDate(task.getFinishedAt())
+        );
+    }
+
     private SosVo toSosVo(PatrolSosEvent event) {
         return new SosVo(
             event.getSosId(),
@@ -1885,6 +2047,17 @@ public class PatrolController {
         return String.format("%.1f MB", bytes / 1024D / 1024D);
     }
 
+    private String packageFormat(String fileName) {
+        String lower = blankToDefault(fileName, "").toLowerCase();
+        if (lower.endsWith(".zip")) {
+            return "zip";
+        }
+        if (lower.endsWith(".ufw")) {
+            return "ufw";
+        }
+        return "bin";
+    }
+
     private String sha256(MultipartFile file) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -2012,6 +2185,18 @@ public class PatrolController {
     }
 
     public record AppVersionBo(Integer versionCode, String versionName, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId) {
+    }
+
+    public record FirmwareVersionVo(String firmwareId, String deviceType, String vendor, String chipset, String deviceModel, String hardwareVersion, String firmwareType, Integer versionCode, String versionName, String minCurrentVersion, String maxCurrentVersion, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId, Long fileSizeBytes, String packageFormat, String upgradeMode, String grayScope, String grayTargets, String status, String publishedAt, String remark) {
+    }
+
+    public record FirmwarePackageVo(String fileId, String fileName, String downloadUrl, String sha256, Long fileSizeBytes, String sizeText, String packageFormat) {
+    }
+
+    public record FirmwareVersionBo(String deviceType, String vendor, String chipset, String deviceModel, String hardwareVersion, String firmwareType, Integer versionCode, String versionName, String minCurrentVersion, String maxCurrentVersion, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId, Long fileSizeBytes, String packageFormat, String upgradeMode, String grayScope, String grayTargets, String remark) {
+    }
+
+    public record FirmwareUpgradeTaskVo(String taskId, String deviceId, String firmwareId, String operatorId, String fromVersion, String toVersion, String status, Float progress, String errorCode, String errorMessage, String startedAt, String finishedAt) {
     }
 
     public record SosVo(String sosId, String officerName, String badgeNo, String deptName, String deviceId, String locationText, String status, String disposition, Boolean recordingAudio, Integer backupEtaMinutes, String createdAt) {

@@ -29,6 +29,8 @@ import org.dromara.patrol.domain.PatrolDeviceBinding;
 import org.dromara.patrol.domain.PatrolDeviceCommand;
 import org.dromara.patrol.domain.PatrolDeviceConfig;
 import org.dromara.patrol.domain.PatrolDeviceEvent;
+import org.dromara.patrol.domain.PatrolFirmwareUpgradeTask;
+import org.dromara.patrol.domain.PatrolFirmwareVersion;
 import org.dromara.patrol.domain.PatrolLocationTrack;
 import org.dromara.patrol.domain.PatrolMedia;
 import org.dromara.patrol.domain.PatrolMediaUploadTask;
@@ -49,6 +51,11 @@ import org.dromara.patrol.entity.DeviceWifiStateDto;
 import org.dromara.patrol.entity.FaceLibraryAckRequestDto;
 import org.dromara.patrol.entity.FaceLibraryPackageDto;
 import org.dromara.patrol.entity.FaceLibraryPersonDto;
+import org.dromara.patrol.entity.FirmwareCheckDto;
+import org.dromara.patrol.entity.FirmwareCheckRequestDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskCreateDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskUpdateDto;
 import org.dromara.patrol.entity.GpsLocationDto;
 import org.dromara.patrol.entity.HeartbeatAckDto;
 import org.dromara.patrol.entity.HeartbeatRequestDto;
@@ -85,6 +92,8 @@ import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
 import org.dromara.patrol.mapper.PatrolDeviceBindingMapper;
 import org.dromara.patrol.mapper.PatrolDeviceConfigMapper;
 import org.dromara.patrol.mapper.PatrolDeviceEventMapper;
+import org.dromara.patrol.mapper.PatrolFirmwareUpgradeTaskMapper;
+import org.dromara.patrol.mapper.PatrolFirmwareVersionMapper;
 import org.dromara.patrol.mapper.PatrolLocationTrackMapper;
 import org.dromara.patrol.mapper.PatrolMediaMapper;
 import org.dromara.patrol.mapper.PatrolMediaUploadTaskMapper;
@@ -161,6 +170,8 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private final PatrolAreaMapper areaMapper;
     private final PatrolSosEventMapper sosEventMapper;
     private final PatrolAppVersionMapper appVersionMapper;
+    private final PatrolFirmwareVersionMapper firmwareVersionMapper;
+    private final PatrolFirmwareUpgradeTaskMapper firmwareUpgradeTaskMapper;
     private final PatrolControlPersonMapper controlPersonMapper;
     private final PatrolCerebellumConfigMapper cerebellumConfigMapper;
     private final PatrolRealtimePublisher realtimePublisher;
@@ -1092,6 +1103,111 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     @Override
+    public FirmwareCheckDto checkFirmware(String deviceId, FirmwareCheckRequestDto request) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            PatrolDevice device = deviceMapper.selectById(deviceId);
+            String currentVersion = blankToDefault(
+                request == null ? null : request.getCurrentFirmwareVersion(),
+                device == null ? "" : blankToDefault(device.getFirmwareVersion(), "")
+            );
+            String deviceType = normalizeMatchValue(request == null ? null : request.getDeviceType(), device == null ? "" : device.getDeviceType());
+            String vendor = normalizeMatchValue(request == null ? null : request.getVendor(), "");
+            String chipset = normalizeMatchValue(request == null ? null : request.getChipset(), "");
+            String deviceModel = normalizeMatchValue(request == null ? null : request.getDeviceModel(), "");
+            String hardwareVersion = normalizeMatchValue(request == null ? null : request.getHardwareVersion(), "");
+
+            List<PatrolFirmwareVersion> candidates = firmwareVersionMapper.selectList(new LambdaQueryWrapper<PatrolFirmwareVersion>()
+                    .eq(PatrolFirmwareVersion::getStatus, "PUBLISHED"))
+                .stream()
+                .filter(item -> matchesFirmware(item.getDeviceType(), deviceType))
+                .filter(item -> matchesFirmware(item.getVendor(), vendor))
+                .filter(item -> matchesFirmware(item.getChipset(), chipset))
+                .filter(item -> matchesFirmware(item.getDeviceModel(), deviceModel))
+                .filter(item -> matchesFirmware(item.getHardwareVersion(), hardwareVersion))
+                .filter(item -> matchesFirmwareVersionRange(item, currentVersion))
+                .sorted(Comparator.comparing((PatrolFirmwareVersion item) -> value(item.getVersionCode(), 0)).reversed()
+                    .thenComparing(PatrolFirmwareVersion::getPublishedAt, Comparator.nullsLast(Comparator.reverseOrder())))
+                .toList();
+            PatrolFirmwareVersion latest = candidates.stream().findFirst().orElse(null);
+            if (latest == null) {
+                return new FirmwareCheckDto(false, null, deviceType, vendor, chipset, deviceModel, hardwareVersion, null, null, currentVersion, false, List.of(), null, null, null, null, null, null, currentVersion, "当前设备没有匹配的固件包");
+            }
+            boolean sameVersion = !currentVersion.isBlank() && currentVersion.equalsIgnoreCase(blankToDefault(latest.getVersionName(), ""));
+            return toFirmwareCheckDto(latest, !sameVersion, currentVersion, sameVersion ? "当前已是最新固件" : "发现可升级固件");
+        });
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public FirmwareUpgradeTaskDto createFirmwareUpgradeTask(String deviceId, FirmwareUpgradeTaskCreateDto request) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            if (request == null || request.getFirmwareId() == null || request.getFirmwareId().isBlank()) {
+                throw new ServiceException("固件ID不能为空");
+            }
+            PatrolFirmwareVersion firmware = firmwareVersionMapper.selectById(request.getFirmwareId());
+            if (firmware == null) {
+                throw new ServiceException("固件版本不存在");
+            }
+            String fromVersion = blankToDefault(request.getFromVersion(), "");
+            if (fromVersion.isBlank()) {
+                PatrolDevice device = deviceMapper.selectById(deviceId);
+                fromVersion = device == null ? "" : blankToDefault(device.getFirmwareVersion(), "");
+            }
+            PatrolFirmwareUpgradeTask task = new PatrolFirmwareUpgradeTask();
+            task.setTaskId("FUT-" + IdUtil.fastSimpleUUID());
+            task.setTenantId(TENANT_ID);
+            task.setDeviceId(deviceId);
+            task.setFirmwareId(firmware.getFirmwareId());
+            task.setOperatorId(blankToDefault(request.getOperatorId(), currentOperator()));
+            task.setFromVersion(fromVersion);
+            task.setToVersion(blankToDefault(firmware.getVersionName(), ""));
+            task.setStatus("PENDING");
+            task.setProgress(0F);
+            task.setStartedAt(new Date());
+            task.setDelFlag("0");
+            firmwareUpgradeTaskMapper.insert(task);
+            saveAudit("FIRMWARE", "App创建固件升级任务", task.getTaskId(), "SUCCESS");
+            realtimePublisher.publish("FIRMWARE_UPGRADE_CREATED", "devices", "设备固件升级任务已创建", task.getDeviceId(), task.getTaskId(),
+                realtimePublisher.payload("taskId", task.getTaskId(), "deviceId", task.getDeviceId(), "firmwareId", task.getFirmwareId(), "toVersion", task.getToVersion()));
+            return toFirmwareUpgradeTaskDto(task);
+        });
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public FirmwareUpgradeTaskDto updateFirmwareUpgradeTask(String taskId, FirmwareUpgradeTaskUpdateDto request) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            if (request == null) {
+                throw new ServiceException("升级任务状态不能为空");
+            }
+            PatrolFirmwareUpgradeTask task = firmwareUpgradeTaskMapper.selectById(taskId);
+            if (task == null) {
+                throw new ServiceException("固件升级任务不存在");
+            }
+            String status = blankToDefault(request.getStatus(), task.getStatus());
+            task.setStatus(status);
+            task.setProgress(value(request.getProgress(), value(task.getProgress(), 0F)));
+            task.setErrorCode(blankToDefault(request.getErrorCode(), task.getErrorCode()));
+            task.setErrorMessage(blankToDefault(request.getErrorMessage(), task.getErrorMessage()));
+            if ("SUCCESS".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status)) {
+                task.setFinishedAt(new Date());
+            }
+            firmwareUpgradeTaskMapper.updateById(task);
+            if ("SUCCESS".equals(status)) {
+                PatrolDevice device = deviceMapper.selectById(task.getDeviceId());
+                if (device != null && task.getToVersion() != null && !task.getToVersion().isBlank()) {
+                    device.setFirmwareVersion(task.getToVersion());
+                    deviceMapper.updateById(device);
+                }
+            }
+            saveAudit("FIRMWARE", "App更新固件升级任务：" + status, taskId, "SUCCESS");
+            realtimePublisher.publish("FIRMWARE_UPGRADE_UPDATED", "devices", "设备固件升级状态已更新", task.getDeviceId(), taskId,
+                realtimePublisher.payload("taskId", taskId, "deviceId", task.getDeviceId(), "status", task.getStatus(), "progress", task.getProgress(), "errorCode", task.getErrorCode()));
+            return toFirmwareUpgradeTaskDto(task);
+        });
+    }
+
+    @Override
     public FaceLibraryPackageDto faceLibraryPackage(String deviceId, String currentVersion, boolean force) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             Date now = new Date();
@@ -1728,6 +1844,86 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             message.getStatus(),
             message.getSentAt() == null ? "" : message.getSentAt().toString()
         );
+    }
+
+    private FirmwareCheckDto toFirmwareCheckDto(PatrolFirmwareVersion firmware, boolean hasUpdate, String currentVersion, String message) {
+        return new FirmwareCheckDto(
+            hasUpdate,
+            firmware.getFirmwareId(),
+            blankToDefault(firmware.getDeviceType(), ""),
+            blankToDefault(firmware.getVendor(), ""),
+            blankToDefault(firmware.getChipset(), ""),
+            blankToDefault(firmware.getDeviceModel(), ""),
+            blankToDefault(firmware.getHardwareVersion(), ""),
+            blankToDefault(firmware.getFirmwareType(), ""),
+            firmware.getVersionCode(),
+            blankToDefault(firmware.getVersionName(), ""),
+            Boolean.TRUE.equals(firmware.getForceUpdate()),
+            changelog(firmware.getChangelog()),
+            blankToDefault(firmware.getDownloadUrl(), ""),
+            blankToDefault(firmware.getSha256(), ""),
+            blankToDefault(firmware.getFileId(), ""),
+            value(firmware.getFileSizeBytes(), 0L),
+            blankToDefault(firmware.getPackageFormat(), ""),
+            blankToDefault(firmware.getUpgradeMode(), "APP_BLE"),
+            blankToDefault(currentVersion, ""),
+            message
+        );
+    }
+
+    private FirmwareUpgradeTaskDto toFirmwareUpgradeTaskDto(PatrolFirmwareUpgradeTask task) {
+        return new FirmwareUpgradeTaskDto(
+            task.getTaskId(),
+            task.getDeviceId(),
+            task.getFirmwareId(),
+            blankToDefault(task.getOperatorId(), ""),
+            blankToDefault(task.getFromVersion(), ""),
+            blankToDefault(task.getToVersion(), ""),
+            blankToDefault(task.getStatus(), "PENDING"),
+            value(task.getProgress(), 0F),
+            blankToDefault(task.getErrorCode(), ""),
+            blankToDefault(task.getErrorMessage(), ""),
+            task.getStartedAt() == null ? "" : task.getStartedAt().toString(),
+            task.getFinishedAt() == null ? "" : task.getFinishedAt().toString()
+        );
+    }
+
+    private String normalizeMatchValue(String primary, String fallback) {
+        return blankToDefault(primary, blankToDefault(fallback, "")).trim().toUpperCase();
+    }
+
+    private boolean matchesFirmware(String rule, String actual) {
+        String normalizedRule = blankToDefault(rule, "").trim().toUpperCase();
+        if (normalizedRule.isBlank() || "ALL".equals(normalizedRule) || "*".equals(normalizedRule)) {
+            return true;
+        }
+        String normalizedActual = blankToDefault(actual, "").trim().toUpperCase();
+        return !normalizedActual.isBlank() && normalizedRule.equals(normalizedActual);
+    }
+
+    private boolean matchesFirmwareVersionRange(PatrolFirmwareVersion firmware, String currentVersion) {
+        long current = firmwareVersionRank(currentVersion);
+        long min = firmwareVersionRank(firmware.getMinCurrentVersion());
+        long max = firmwareVersionRank(firmware.getMaxCurrentVersion());
+        if (min > 0 && current > 0 && current < min) {
+            return false;
+        }
+        if (max > 0 && current > 0 && current > max) {
+            return false;
+        }
+        return true;
+    }
+
+    private long firmwareVersionRank(String version) {
+        String digits = blankToDefault(version, "").replaceAll("\\D+", "");
+        if (digits.isBlank()) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(digits.length() > 12 ? digits.substring(digits.length() - 12) : digits);
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
     private <T> PageEnvelope<T> page(List<T> items, int page, int pageSize) {

@@ -13,6 +13,11 @@ import org.dromara.patrol.entity.DeviceStatusDto;
 import org.dromara.patrol.entity.DeviceWifiStateDto;
 import org.dromara.patrol.entity.FaceLibraryAckRequestDto;
 import org.dromara.patrol.entity.FaceLibraryPackageDto;
+import org.dromara.patrol.entity.FirmwareCheckDto;
+import org.dromara.patrol.entity.FirmwareCheckRequestDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskCreateDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskDto;
+import org.dromara.patrol.entity.FirmwareUpgradeTaskUpdateDto;
 import org.dromara.patrol.entity.GpsLocationDto;
 import org.dromara.patrol.entity.HeartbeatAckDto;
 import org.dromara.patrol.entity.HeartbeatRequestDto;
@@ -137,6 +142,12 @@ public interface IPatrolAppService {
     SosEventDto cancelSos();
 
     VersionCheckDto checkVersion(int currentVersionCode);
+
+    FirmwareCheckDto checkFirmware(String deviceId, FirmwareCheckRequestDto request);
+
+    FirmwareUpgradeTaskDto createFirmwareUpgradeTask(String deviceId, FirmwareUpgradeTaskCreateDto request);
+
+    FirmwareUpgradeTaskDto updateFirmwareUpgradeTask(String taskId, FirmwareUpgradeTaskUpdateDto request);
 
     FaceLibraryPackageDto faceLibraryPackage(String deviceId, String currentVersion, boolean force);
 
