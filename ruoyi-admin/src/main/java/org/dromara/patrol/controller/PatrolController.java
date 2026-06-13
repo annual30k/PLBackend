@@ -17,6 +17,7 @@ import org.dromara.patrol.domain.PatrolAlert;
 import org.dromara.patrol.domain.PatrolAlertAttachment;
 import org.dromara.patrol.domain.PatrolAlertDisposition;
 import org.dromara.patrol.domain.PatrolAppVersion;
+import org.dromara.patrol.domain.PatrolArea;
 import org.dromara.patrol.domain.PatrolAuditLog;
 import org.dromara.patrol.domain.PatrolControlPerson;
 import org.dromara.patrol.domain.PatrolControlVehicle;
@@ -48,6 +49,7 @@ import org.dromara.patrol.mapper.PatrolAlertAttachmentMapper;
 import org.dromara.patrol.mapper.PatrolAlertDispositionMapper;
 import org.dromara.patrol.mapper.PatrolAlertMapper;
 import org.dromara.patrol.mapper.PatrolAppVersionMapper;
+import org.dromara.patrol.mapper.PatrolAreaMapper;
 import org.dromara.patrol.mapper.PatrolAuditLogMapper;
 import org.dromara.patrol.mapper.PatrolControlPersonMapper;
 import org.dromara.patrol.mapper.PatrolControlVehicleMapper;
@@ -68,6 +70,7 @@ import org.dromara.patrol.mapper.PatrolSosDispositionMapper;
 import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.dromara.patrol.service.IPatrolAppService;
 import org.dromara.patrol.service.PatrolRealtimePublisher;
+import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.system.domain.vo.SysOssVo;
 import org.dromara.system.domain.SysOssConfig;
 import org.dromara.system.mapper.SysOssConfigMapper;
@@ -150,6 +153,7 @@ public class PatrolController {
     private final PatrolDailyReportMapper dailyReportMapper;
     private final PatrolDeviceBindingMapper deviceBindingMapper;
     private final PatrolAppVersionMapper appVersionMapper;
+    private final PatrolAreaMapper areaMapper;
     private final PatrolFirmwareVersionMapper firmwareVersionMapper;
     private final PatrolFirmwareUpgradeTaskMapper firmwareUpgradeTaskMapper;
     private final PatrolDeviceConfigMapper deviceConfigMapper;
@@ -407,6 +411,46 @@ public class PatrolController {
             .limit(100)
             .map(this::toTrackPointVo)
             .toList());
+    }
+
+    @GetMapping("/areas")
+    public R<List<PatrolAreaVo>> patrolAreas() {
+        return R.ok(areaMapper.selectList(new LambdaQueryWrapper<PatrolArea>()
+                .orderByDesc(PatrolArea::getUpdateTime)
+                .orderByDesc(PatrolArea::getCreateTime))
+            .stream()
+            .map(this::toPatrolAreaVo)
+            .toList());
+    }
+
+    @GetMapping("/areas/current")
+    public R<PatrolAreaVo> currentPatrolAreaForConsole() {
+        return R.ok(toPatrolAreaVo(currentArea()));
+    }
+
+    @PostMapping("/areas")
+    public R<PatrolAreaVo> savePatrolArea(@RequestBody PatrolAreaBo request) {
+        PatrolArea area = request.areaId() == null || request.areaId().isBlank()
+            ? null
+            : areaMapper.selectById(request.areaId());
+        if (area == null) {
+            area = new PatrolArea();
+            area.setAreaId(blankToDefault(request.areaId(), "AREA-" + IdUtil.fastSimpleUUID()));
+            area.setTenantId(currentTenantId());
+            area.setDelFlag("0");
+            area.setCreateTime(new Date());
+        }
+        area.setAreaName(blankToDefault(request.areaName(), "未命名执勤辖区"));
+        area.setTeamId(blankToDefault(request.teamId(), "DEFAULT"));
+        area.setTeamName(blankToDefault(request.teamName(), "默认执勤组"));
+        area.setBoundaryJson(JsonUtils.toJsonString(request.boundary() == null ? List.of() : request.boundary()));
+        area.setRouteJson(JsonUtils.toJsonString(request.route() == null ? List.of() : request.route()));
+        area.setUpdateTime(new Date());
+        areaMapper.insertOrUpdate(area);
+        logAudit("AREA", "保存执勤辖区", area.getAreaId(), "SUCCESS");
+        realtimePublisher.publish("PATROL_AREA_UPDATED", "map", "执勤辖区已更新", area.getAreaName(), area.getAreaId(),
+            realtimePublisher.payload("areaId", area.getAreaId(), "areaName", area.getAreaName(), "teamName", area.getTeamName()));
+        return R.ok(toPatrolAreaVo(area));
     }
 
     @GetMapping("/alerts")
@@ -1466,6 +1510,54 @@ public class PatrolController {
         );
     }
 
+    private PatrolArea currentArea() {
+        return areaMapper.selectList(new LambdaQueryWrapper<PatrolArea>()
+                .orderByDesc(PatrolArea::getUpdateTime)
+                .orderByDesc(PatrolArea::getCreateTime))
+            .stream()
+            .findFirst()
+            .orElse(null);
+    }
+
+    private PatrolAreaVo toPatrolAreaVo(PatrolArea area) {
+        if (area == null) {
+            return fallbackPatrolArea();
+        }
+        return new PatrolAreaVo(
+            area.getAreaId(),
+            area.getAreaName(),
+            area.getTeamId(),
+            area.getTeamName(),
+            parseGeoPoints(area.getBoundaryJson()),
+            parseGeoPoints(area.getRouteJson()),
+            formatDate(area.getUpdateTime() == null ? area.getCreateTime() : area.getUpdateTime())
+        );
+    }
+
+    private PatrolAreaVo fallbackPatrolArea() {
+        List<PatrolGeoPointVo> boundary = List.of(
+            new PatrolGeoPointVo(26.1048, 119.3009),
+            new PatrolGeoPointVo(26.1044, 119.3137),
+            new PatrolGeoPointVo(26.0977, 119.3145),
+            new PatrolGeoPointVo(26.0968, 119.3024)
+        );
+        List<PatrolGeoPointVo> route = List.of(
+            new PatrolGeoPointVo(26.1036, 119.3025),
+            new PatrolGeoPointVo(26.1017, 119.3065),
+            new PatrolGeoPointVo(26.0995, 119.3104),
+            new PatrolGeoPointVo(26.0979, 119.3131)
+        );
+        return new PatrolAreaVo("AREA-FZ-WQ-001", "五四路核心勤务区", "PTL-GROUP-A", "第一巡逻支队 A 组", boundary, route, "-");
+    }
+
+    private List<PatrolGeoPointVo> parseGeoPoints(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        List<PatrolGeoPointVo> points = JsonUtils.parseArray(json, PatrolGeoPointVo.class);
+        return points == null ? List.of() : points;
+    }
+
     private String alertType(PatrolAlert alert) {
         String text = blankToDefault(alert.getTitle(), "") + blankToDefault(alert.getDescription(), "");
         if (text.contains("车")) {
@@ -2143,6 +2235,15 @@ public class PatrolController {
     }
 
     public record TrackPointVo(String badgeNo, BigDecimal latitude, BigDecimal longitude, String address, String reportedAt) {
+    }
+
+    public record PatrolGeoPointVo(Double latitude, Double longitude) {
+    }
+
+    public record PatrolAreaVo(String areaId, String areaName, String teamId, String teamName, List<PatrolGeoPointVo> boundary, List<PatrolGeoPointVo> route, String updatedAt) {
+    }
+
+    public record PatrolAreaBo(String areaId, String areaName, String teamId, String teamName, List<PatrolGeoPointVo> boundary, List<PatrolGeoPointVo> route) {
     }
 
     public record AlertVo(String alertId, String alertType, String title, String targetName, String deviceId, String officerName, String locationText, String status, String level, String confidence, String occurredAt) {

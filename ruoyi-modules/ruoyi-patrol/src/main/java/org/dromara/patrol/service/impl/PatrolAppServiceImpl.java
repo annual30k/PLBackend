@@ -439,6 +439,50 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public DeviceControlResultDto clearDeviceAccount(String deviceId) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            PatrolDevice device = getOrCreateDevice(deviceId);
+            device.setBonded(false);
+            device.setCloudConnected(false);
+            deviceMapper.insertOrUpdate(device);
+            saveDeviceEvent(deviceId, "ACCOUNT_CLEAR", "WARNING", "设备账号已清除", "App端已执行设备账号清除并同步平台状态");
+            saveAudit("DEVICE", "App清除设备账号", deviceId, "SUCCESS");
+            realtimePublisher.publish("DEVICE_EVENT", "devices", "设备账号已清除", deviceId + " 账号绑定状态已清除", deviceId,
+                realtimePublisher.payload("deviceId", deviceId, "bonded", false, "cloudConnected", false));
+            return new DeviceControlResultDto(true, "CLEARED", "设备账号清除状态已记录");
+        });
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public DeviceControlResultDto factoryResetDevice(String deviceId, String target) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            PatrolDevice device = getOrCreateDevice(deviceId);
+            device.setOnline(false);
+            device.setBonded(false);
+            device.setCloudConnected(false);
+            device.setRecordingStatus("IDLE");
+            device.setTalking(false);
+            device.setOnlineDuration("00:00:00");
+            deviceMapper.insertOrUpdate(device);
+            PatrolDeviceConfig config = getOrCreateDeviceConfig(deviceId);
+            config.setWifiEnabled(false);
+            config.setWifiSsid("");
+            config.setWifiPasswordConfigured(false);
+            config.setWifiConnected(false);
+            config.setRealtimeAudioSyncing(false);
+            deviceConfigMapper.insertOrUpdate(config);
+            String normalizedTarget = blankToDefault(target, "HEADSET").toUpperCase();
+            saveDeviceEvent(deviceId, "FACTORY_RESET", "WARNING", "设备恢复出厂", "App端已执行" + normalizedTarget + "恢复出厂并同步平台状态");
+            saveAudit("DEVICE", "App恢复出厂：" + normalizedTarget, deviceId, "SUCCESS");
+            realtimePublisher.publish("DEVICE_STATUS", "devices", "设备恢复出厂", deviceId + " 已恢复出厂并离线", deviceId,
+                realtimePublisher.payload("deviceId", deviceId, "target", normalizedTarget, "online", false, "bonded", false));
+            return new DeviceControlResultDto(true, "RESET", normalizedTarget + " 恢复出厂状态已记录");
+        });
+    }
+
+    @Override
     public PageEnvelope<AlertDto> alerts(int page, int pageSize) {
         return TenantHelper.dynamic(TENANT_ID, () -> page(alertMapper.selectList().stream().map(this::toAlertDto).toList(), page, pageSize));
     }
@@ -1024,14 +1068,37 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Override
     public PatrolAreaDto currentPatrolArea() {
         return TenantHelper.dynamic(TENANT_ID, () -> {
-            PatrolArea area = areaMapper.selectById("AREA-FZ-WQ-001");
+            PatrolArea area = areaMapper.selectList(new LambdaQueryWrapper<PatrolArea>()
+                    .orderByDesc(PatrolArea::getUpdateTime)
+                    .orderByDesc(PatrolArea::getCreateTime))
+                .stream()
+                .findFirst()
+                .orElse(null);
             if (area == null) {
-                return new PatrolAreaDto("", "", "", "", List.of(), List.of());
+                return fallbackPatrolArea();
             }
             List<PatrolGeoPointDto> boundary = JsonUtils.parseArray(area.getBoundaryJson(), PatrolGeoPointDto.class);
             List<PatrolGeoPointDto> route = JsonUtils.parseArray(area.getRouteJson(), PatrolGeoPointDto.class);
-            return new PatrolAreaDto(area.getAreaId(), area.getAreaName(), area.getTeamId(), area.getTeamName(), boundary, route);
+            return new PatrolAreaDto(area.getAreaId(), area.getAreaName(), area.getTeamId(), area.getTeamName(),
+                boundary == null ? List.of() : boundary,
+                route == null ? List.of() : route);
         });
+    }
+
+    private PatrolAreaDto fallbackPatrolArea() {
+        List<PatrolGeoPointDto> boundary = List.of(
+            new PatrolGeoPointDto(26.1048, 119.3009),
+            new PatrolGeoPointDto(26.1044, 119.3137),
+            new PatrolGeoPointDto(26.0977, 119.3145),
+            new PatrolGeoPointDto(26.0968, 119.3024)
+        );
+        List<PatrolGeoPointDto> route = List.of(
+            new PatrolGeoPointDto(26.1036, 119.3025),
+            new PatrolGeoPointDto(26.1017, 119.3065),
+            new PatrolGeoPointDto(26.0995, 119.3104),
+            new PatrolGeoPointDto(26.0979, 119.3131)
+        );
+        return new PatrolAreaDto("AREA-FZ-WQ-001", "五四路核心勤务区", "PTL-GROUP-A", "第一巡逻支队 A 组", boundary, route);
     }
 
     @Override

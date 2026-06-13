@@ -170,6 +170,18 @@ public class PatrolAppApiController {
         return ok(patrolAppService.notifyMediaSyncCompleted(deviceId));
     }
 
+    @PostMapping("/devices/{deviceId}/account/clear")
+    public ApiEnvelope<DeviceControlResultDto> clearDeviceAccount(@PathVariable String deviceId) {
+        return ok(patrolAppService.clearDeviceAccount(deviceId));
+    }
+
+    @PostMapping("/devices/{deviceId}/factory-reset")
+    public ApiEnvelope<DeviceControlResultDto> factoryResetDevice(
+        @PathVariable String deviceId,
+        @RequestParam(defaultValue = "HEADSET") String target) {
+        return ok(patrolAppService.factoryResetDevice(deviceId, target));
+    }
+
     @GetMapping("/alerts")
     public ApiEnvelope<PageEnvelope<AlertDto>> alerts(
         @RequestParam(defaultValue = "1") int page,

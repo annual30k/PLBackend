@@ -81,6 +81,10 @@ public interface IPatrolAppService {
 
     DeviceControlResultDto notifyMediaSyncCompleted(String deviceId);
 
+    DeviceControlResultDto clearDeviceAccount(String deviceId);
+
+    DeviceControlResultDto factoryResetDevice(String deviceId, String target);
+
     PageEnvelope<AlertDto> alerts(int page, int pageSize);
 
     AlertDto acknowledgeAlert(String alertId);
