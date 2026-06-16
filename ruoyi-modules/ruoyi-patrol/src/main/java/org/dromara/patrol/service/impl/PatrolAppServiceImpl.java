@@ -11,6 +11,7 @@ import org.dromara.common.core.constant.SystemConstants;
 import org.dromara.common.core.constant.TenantConstants;
 import org.dromara.common.core.domain.model.LoginUser;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.common.core.service.OssService;
 import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.oss.factory.OssFactory;
 import org.dromara.common.redis.utils.RedisUtils;
@@ -101,6 +102,7 @@ import org.dromara.patrol.mapper.PatrolMessageMapper;
 import org.dromara.patrol.mapper.PatrolMessageReceiptMapper;
 import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.dromara.patrol.service.IPatrolAppService;
+import org.dromara.patrol.service.OssAccessUrlResolver;
 import org.dromara.patrol.service.PatrolRealtimePublisher;
 import org.dromara.system.domain.SysUser;
 import org.dromara.system.domain.vo.SysDeptVo;
@@ -153,6 +155,8 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private final SysUserMapper userMapper;
     private final ISysDeptService deptService;
     private final ISysOssService ossService;
+    private final OssService commonOssService;
+    private final OssAccessUrlResolver ossAccessUrlResolver;
     private final PatrolDeviceMapper deviceMapper;
     private final PatrolDeviceCommandMapper commandMapper;
     private final PatrolDeviceBindingMapper deviceBindingMapper;
@@ -212,6 +216,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             .eq(SysUser::getUserId, loginUser.getUserId())));
         String name = user == null ? loginUser.getNickname() : user.getNickName();
         String badgeNo = user == null ? loginUser.getUsername() : user.getUserName();
+        String avatar = resolveAvatarUrl(user);
         return new UserProfileDto(
             String.valueOf(loginUser.getUserId()),
             blankToDefault(name, badgeNo),
@@ -222,8 +227,18 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             "",
             "",
             blankToDefault(loginUser.getDeptName(), ""),
-            ""
+            "",
+            avatar
         );
+    }
+
+    private String resolveAvatarUrl(SysUserVo user) {
+        if (user == null || user.getAvatar() == null) {
+            return "";
+        }
+        String storageUrl = TenantHelper.dynamic(TENANT_ID, () -> commonOssService.selectUrlByIds(String.valueOf(user.getAvatar())));
+        String firstUrl = blankToDefault(storageUrl, "").split(",", 2)[0];
+        return ossAccessUrlResolver.toExternalUrl(firstUrl);
     }
 
     @Override

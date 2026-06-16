@@ -61,4 +61,9 @@ public class UserProfileDto {
      * 系统节点
      */
     private String systemNode;
+
+    /**
+     * 头像地址
+     */
+    private String avatar;
 }

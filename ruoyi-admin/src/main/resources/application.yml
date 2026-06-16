@@ -259,6 +259,13 @@ websocket:
   # 设置访问源地址
   allowedOrigins: '*'
 
+--- # PatrolLink App 文件访问配置
+patrol:
+  file:
+    # App 可访问的文件服务基址。本地真机联调用 application-dev.yml 覆盖；
+    # 公网部署时设置 PATROL_FILE_PUBLIC_BASE_URL，例如 https://files.example.com。
+    public-base-url: ${PATROL_FILE_PUBLIC_BASE_URL:}
+
 --- # warm-flow工作流配置
 warm-flow:
   # 是否开启工作流，默认true

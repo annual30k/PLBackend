@@ -268,3 +268,10 @@ justauth:
       client-id: 10**********6
       client-secret: 1f7d08**********5b7**********29e
       redirect-uri: ${justauth.address}/social-callback?source=gitea
+
+--- # 巡逻执法耳机系统自定义配置
+patrol:
+  file:
+    # App 真机不能访问 localhost、127.0.0.1 或 Docker 内部服务名。
+    # 本地联调时配置为宿主机局域网地址；公网部署时只需改为 HTTPS 文件/CDN 域名。
+    public-base-url: "http://192.168.11.157:9000"
