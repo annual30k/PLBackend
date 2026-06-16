@@ -14,6 +14,7 @@ import org.dromara.common.oss.exception.OssException;
 import org.dromara.common.oss.properties.OssProperties;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.async.AsyncResponseTransformer;
 import software.amazon.awssdk.core.async.BlockingInputStreamAsyncRequestBody;
 import software.amazon.awssdk.core.async.ResponsePublisher;
@@ -183,16 +184,9 @@ public class OssClient {
      * @throws OssException 如果上传失败，抛出自定义异常
      */
     public UploadResult upload(InputStream inputStream, String key, Long length, String contentType) {
-        // 如果输入流不是 ByteArrayInputStream，则将其读取为字节数组再创建 ByteArrayInputStream
-        if (!(inputStream instanceof ByteArrayInputStream)) {
-            inputStream = new ByteArrayInputStream(IoUtil.readBytes(inputStream));
-        }
         try {
-            // 创建异步请求体（length如果为空会报错）
-            BlockingInputStreamAsyncRequestBody body = BlockingInputStreamAsyncRequestBody.builder()
-                .contentLength(length)
-                .subscribeTimeout(Duration.ofSeconds(120))
-                .build();
+            byte[] bytes = IoUtil.readBytes(inputStream);
+            AsyncRequestBody body = AsyncRequestBody.fromBytes(bytes);
 
             // 使用 transferManager 进行上传
             Upload upload = transferManager.upload(
@@ -212,14 +206,11 @@ public class OssClient {
                 }
             );
 
-            // 将输入流写入请求体
-            body.writeInputStream(inputStream);
-
             // 等待文件上传操作完成
             CompletedUpload uploadResult = upload.completionFuture().join();
             String eTag = uploadResult.response().eTag();
 
-            // 提取上传结果中的 ETag，并构建一个自定义的 UploadResult 对象
+            // 提取上传结果中的 ETag，并构建一个自定义 of UploadResult 对象
             return UploadResult.builder().url(getUrl() + StringUtils.SLASH + key).filename(key).eTag(eTag).build();
         } catch (Exception e) {
             throw new OssException("上传文件失败，请检查配置信息:[" + e.getMessage() + "]");

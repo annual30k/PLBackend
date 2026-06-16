@@ -121,10 +121,9 @@ public class SysProfileController extends BaseController {
                 return R.fail("文件格式不正确，请上传" + Arrays.toString(MimeTypeUtils.IMAGE_EXTENSION) + "格式");
             }
             SysOssVo oss = ossService.upload(avatarfile);
-            String avatar = oss.getUrl();
             boolean updateSuccess = DataPermissionHelper.ignore(() -> userService.updateUserAvatar(LoginHelper.getUserId(), oss.getOssId()));
             if (updateSuccess) {
-                return R.ok(new AvatarVo(avatar));
+                return R.ok(new AvatarVo(oss.getOssId(), oss.getUrl()));
             }
         }
         return R.fail("上传图片异常，请联系管理员");
@@ -133,9 +132,10 @@ public class SysProfileController extends BaseController {
     /**
      * 用户头像信息
      *
+     * @param ossId  OSS对象ID
      * @param imgUrl 头像地址
      */
-    public record AvatarVo(String imgUrl) {}
+    public record AvatarVo(Long ossId, String imgUrl) {}
 
     /**
      * 用户个人信息
