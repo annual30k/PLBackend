@@ -36,6 +36,7 @@ import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
@@ -50,6 +51,9 @@ public class PatrolFileController {
 
     private static final long RESPONSE_TIME = 1715832000L;
     private static final String SAMPLE_PREFIX = "classpath:patrol-samples/";
+    private static final byte[] PLACEHOLDER_JPEG = Base64.getDecoder().decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAVEAEBAAAAAAAAAAAAAAAAAAAAAf/aAAwDAQACEAMQAAABqA//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Al//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z"
+    );
 
     private final PatrolMediaMapper mediaMapper;
     private final ISysOssService ossService;
@@ -57,7 +61,9 @@ public class PatrolFileController {
 
     @GetMapping
     public ApiEnvelope<List<MediaFileDto>> listDeviceFiles() {
+        Long userId = currentUserIdOrNull();
         List<MediaFileDto> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>()
+                .eq(userId != null, PatrolMedia::getCreateBy, userId)
                 .eq(PatrolMedia::getStorageSide, "DEVICE"))
             .stream()
             .map(this::toMediaDto)
@@ -109,13 +115,13 @@ public class PatrolFileController {
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
             return;
         }
-        PatrolMedia media = findMedia(fileId);
-        if (media.getOssId() != null) {
-            ossService.download(media.getOssId(), response);
+        PatrolMedia media = findMedia(fileId, currentUserIdOrNull());
+        if (shouldServeClasspathSample(media)) {
+            writeClasspathSample(media, response);
             return;
         }
-        if (StringUtils.isNotBlank(media.getObjectKey()) && media.getObjectKey().startsWith(SAMPLE_PREFIX)) {
-            writeClasspathSample(media, response);
+        if (media.getOssId() != null) {
+            ossService.download(media.getOssId(), response);
             return;
         }
         byte[] placeholder = ("PatrolLink evidence placeholder for " + fileId + "\n").getBytes(StandardCharsets.UTF_8);
@@ -126,11 +132,18 @@ public class PatrolFileController {
         response.getOutputStream().write(placeholder);
     }
 
+    static boolean shouldServeClasspathSample(PatrolMedia media) {
+        return media != null
+            && StringUtils.isNotBlank(media.getObjectKey())
+            && media.getObjectKey().startsWith(SAMPLE_PREFIX);
+    }
+
     private void writeClasspathSample(PatrolMedia media, HttpServletResponse response) throws IOException {
         String resourcePath = media.getObjectKey().substring(SAMPLE_PREFIX.length());
         ClassPathResource resource = new ClassPathResource("patrol-samples/" + resourcePath);
         if (!resource.exists()) {
-            throw new ServiceException("样例媒体文件不存在：" + resourcePath);
+            writeMissingSamplePlaceholder(media, response);
+            return;
         }
         response.setStatus(HttpServletResponse.SC_OK);
         response.setContentType(StringUtils.blankToDefault(media.getMimeType(), MediaType.APPLICATION_OCTET_STREAM_VALUE));
@@ -143,9 +156,29 @@ public class PatrolFileController {
         }
     }
 
+    private void writeMissingSamplePlaceholder(PatrolMedia media, HttpServletResponse response) throws IOException {
+        if ("PHOTO".equalsIgnoreCase(media.getMediaType()) || StringUtils.blankToDefault(media.getMimeType(), "").startsWith("image/")) {
+            response.setStatus(HttpServletResponse.SC_OK);
+            response.setContentType(MediaType.IMAGE_JPEG_VALUE);
+            response.setHeader("Content-Disposition", "attachment; filename=\"" + media.getFileName() + "\"");
+            response.setContentLength(PLACEHOLDER_JPEG.length);
+            response.getOutputStream().write(PLACEHOLDER_JPEG);
+            return;
+        }
+        byte[] placeholder = ("PatrolLink sample media is missing: " + media.getFileName() + "\n").getBytes(StandardCharsets.UTF_8);
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
+        response.setHeader("Content-Disposition", "attachment; filename=\"" + media.getFileName() + "\"");
+        response.setContentLength(placeholder.length);
+        response.getOutputStream().write(placeholder);
+    }
+
     @DeleteMapping("/{fileId}")
     public ApiEnvelope<Boolean> delete(@PathVariable String fileId) {
-        List<PatrolMedia> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId));
+        Long userId = currentUserIdOrNull();
+        List<PatrolMedia> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>()
+            .eq(userId != null, PatrolMedia::getCreateBy, userId)
+            .eq(PatrolMedia::getFileId, fileId));
         boolean deleted = false;
         for (PatrolMedia file : files) {
             if (file.getOssId() != null) {
@@ -156,15 +189,17 @@ public class PatrolFileController {
         return ok(deleted);
     }
 
-    private PatrolMedia findMedia(String fileId) {
+    private PatrolMedia findMedia(String fileId, Long userId) {
         PatrolMedia media = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
             .eq(PatrolMedia::getFileId, fileId)
+            .eq(userId != null, PatrolMedia::getCreateBy, userId)
             .eq(PatrolMedia::getStorageSide, "DEVICE")
             .orderByDesc(PatrolMedia::getCreateTime)
             .last("limit 1"));
         if (media == null) {
             media = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
                 .eq(PatrolMedia::getFileId, fileId)
+                .eq(userId != null, PatrolMedia::getCreateBy, userId)
                 .orderByDesc(PatrolMedia::getCreateTime)
                 .last("limit 1"));
         }
@@ -179,6 +214,14 @@ public class PatrolFileController {
             return StpUtil.isLogin();
         } catch (Exception ignored) {
             return false;
+        }
+    }
+
+    private Long currentUserIdOrNull() {
+        try {
+            return StpUtil.isLogin() ? LoginHelper.getUserId() : null;
+        } catch (Exception ignored) {
+            return null;
         }
     }
 

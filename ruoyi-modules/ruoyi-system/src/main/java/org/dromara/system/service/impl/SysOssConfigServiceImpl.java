@@ -24,9 +24,11 @@ import org.dromara.system.domain.bo.SysOssConfigBo;
 import org.dromara.system.domain.vo.SysOssConfigVo;
 import org.dromara.system.mapper.SysOssConfigMapper;
 import org.dromara.system.service.ISysOssConfigService;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
@@ -44,11 +46,18 @@ public class SysOssConfigServiceImpl implements ISysOssConfigService {
 
     private final SysOssConfigMapper baseMapper;
 
+    @Value("${patrollink.oss.endpoint:}")
+    private String ossEndpointOverride;
+
+    @Value("${patrollink.oss.sync-config-keys:minio,image}")
+    private String ossEndpointOverrideKeys;
+
     /**
      * 项目启动时，初始化参数到缓存，加载配置类
      */
     @Override
     public void init() {
+        syncConfiguredEndpoint();
         List<SysOssConfig> list = baseMapper.selectList();
         // 加载OSS初始化配置
         for (SysOssConfig config : list) {
@@ -57,6 +66,26 @@ public class SysOssConfigServiceImpl implements ISysOssConfigService {
                 RedisUtils.setCacheObject(OssConstant.DEFAULT_CONFIG_KEY, configKey);
             }
             CacheUtils.put(CacheNames.SYS_OSS_CONFIG, config.getConfigKey(), JsonUtils.toJsonString(config));
+        }
+    }
+
+    private void syncConfiguredEndpoint() {
+        if (StringUtils.isBlank(ossEndpointOverride)) {
+            return;
+        }
+        String endpoint = ossEndpointOverride.trim();
+        List<String> configKeys = Arrays.stream(ossEndpointOverrideKeys.split(","))
+            .map(String::trim)
+            .filter(StringUtils::isNotBlank)
+            .toList();
+        if (configKeys.isEmpty()) {
+            return;
+        }
+        int rows = baseMapper.update(null, new LambdaUpdateWrapper<SysOssConfig>()
+            .set(SysOssConfig::getEndpoint, endpoint)
+            .in(SysOssConfig::getConfigKey, configKeys));
+        if (rows > 0) {
+            log.info("同步 YAML OSS endpoint 到数据库 configKeys => {}, endpoint => {}", configKeys, endpoint);
         }
     }
 

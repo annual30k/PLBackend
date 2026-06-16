@@ -131,6 +131,15 @@ redisson:
     # 发布和订阅连接池大小
     subscriptionConnectionPoolSize: 50
 
+patrollink:
+  oss:
+    # 后端进程访问 MinIO/OSS 的地址。真机只访问后端，不直接访问这里。
+    # 本机启动后端: 127.0.0.1:9000
+    # Docker Compose 内启动后端: minio:9000
+    # 局域网共享 MinIO: 192.168.x.x:9000
+    endpoint: ${PATROLLINK_OSS_ENDPOINT:127.0.0.1:9000}
+    sync-config-keys: ${PATROLLINK_OSS_SYNC_CONFIG_KEYS:minio,image}
+
 --- # mail 邮件发送
 mail:
   enabled: false
@@ -274,4 +283,5 @@ patrol:
   file:
     # App 真机不能访问 localhost、127.0.0.1 或 Docker 内部服务名。
     # 本地联调时配置为宿主机局域网地址；公网部署时只需改为 HTTPS 文件/CDN 域名。
-    public-base-url: "http://192.168.11.157:9000"
+    # public-base-url: "http://192.168.11.157:9000"
+    public-base-url: "http://192.168.1.3:9000"

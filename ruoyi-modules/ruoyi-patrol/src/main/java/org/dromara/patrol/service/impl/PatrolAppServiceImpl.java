@@ -530,7 +530,13 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
 
     @Override
     public PageEnvelope<MediaFileDto> mediaFiles(String side, int page, int pageSize) {
-        return TenantHelper.dynamic(TENANT_ID, () -> page(mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getStorageSide, side)).stream().map(this::toMediaDto).toList(), page, pageSize));
+        Long userId = currentAppUserId();
+        return TenantHelper.dynamic(TENANT_ID, () -> page(mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>()
+                .eq(PatrolMedia::getCreateBy, userId)
+                .eq(PatrolMedia::getStorageSide, side))
+            .stream()
+            .map(this::toMediaDto)
+            .toList(), page, pageSize));
     }
 
     @Override
@@ -730,7 +736,9 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
 
     @Override
     public PageEnvelope<MediaUploadTaskDto> mediaUploadTasks(int page, int pageSize) {
+        Long userId = currentAppUserId();
         return TenantHelper.dynamic(TENANT_ID, () -> page(mediaUploadTaskMapper.selectList(new LambdaQueryWrapper<PatrolMediaUploadTask>()
+                .eq(PatrolMediaUploadTask::getCreateBy, userId)
                 .orderByDesc(PatrolMediaUploadTask::getCreateTime))
             .stream()
             .map(this::toUploadTaskDto)
@@ -819,8 +827,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean deleteMedia(String fileId, String side) {
+        Long userId = currentAppUserId();
         return TenantHelper.dynamic(TENANT_ID, () -> {
             boolean deleted = mediaMapper.delete(new LambdaQueryWrapper<PatrolMedia>()
+                .eq(PatrolMedia::getCreateBy, userId)
                 .eq(PatrolMedia::getFileId, fileId)
                 .eq(side != null && !side.isBlank(), PatrolMedia::getStorageSide, side)) > 0;
             saveAudit("MEDIA", "App删除媒体文件", fileId, deleted ? "SUCCESS" : "FAILED");
@@ -833,8 +843,11 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean verifyMedia(String fileId) {
+        Long userId = currentAppUserId();
         return TenantHelper.dynamic(TENANT_ID, () -> {
-            List<PatrolMedia> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId));
+            List<PatrolMedia> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>()
+                .eq(PatrolMedia::getCreateBy, userId)
+                .eq(PatrolMedia::getFileId, fileId));
             files.forEach(file -> {
                 boolean currentVerified = verifyStoredMedia(file);
                 file.setSha256Verified(currentVerified);
@@ -1559,11 +1572,19 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     private PatrolMedia getOrCreateMedia(String fileId, String preferredSide) {
-        PatrolMedia media = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId).eq(PatrolMedia::getStorageSide, preferredSide).last("limit 1"));
+        Long userId = currentAppUserId();
+        PatrolMedia media = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
+            .eq(PatrolMedia::getCreateBy, userId)
+            .eq(PatrolMedia::getFileId, fileId)
+            .eq(PatrolMedia::getStorageSide, preferredSide)
+            .last("limit 1"));
         if (media != null) {
             return media;
         }
-        media = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId).last("limit 1"));
+        media = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
+            .eq(PatrolMedia::getCreateBy, userId)
+            .eq(PatrolMedia::getFileId, fileId)
+            .last("limit 1"));
         if (media != null) {
             return media;
         }
@@ -1586,7 +1607,12 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     private PatrolMedia copyMedia(PatrolMedia original, String side, String status, float progress, boolean verified) {
-        PatrolMedia media = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, original.getFileId()).eq(PatrolMedia::getStorageSide, side).last("limit 1"));
+        Long userId = currentAppUserId();
+        PatrolMedia media = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
+            .eq(PatrolMedia::getCreateBy, userId)
+            .eq(PatrolMedia::getFileId, original.getFileId())
+            .eq(PatrolMedia::getStorageSide, side)
+            .last("limit 1"));
         if (media == null) {
             media = new PatrolMedia();
             media.setMediaId(IdUtil.getSnowflakeNextId());
@@ -1623,6 +1649,14 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private MediaFileDto withTransfer(PatrolMedia original, String side, String status, float progress, boolean verified) {
         PatrolMedia media = copyMedia(original, side, status, progress, verified);
         return toMediaDto(media);
+    }
+
+    private Long currentAppUserId() {
+        Long userId = LoginHelper.getUserId();
+        if (userId == null) {
+            throw new ServiceException("用户未登录");
+        }
+        return userId;
     }
 
     private void cacheDevice(PatrolDevice device) {
@@ -2102,6 +2136,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private PatrolMediaUploadTask getUploadTask(String taskId) {
         PatrolMediaUploadTask task = mediaUploadTaskMapper.selectById(taskId);
         if (task == null) {
+            throw new ServiceException("上传任务不存在");
+        }
+        Long userId = currentAppUserId();
+        if (!userId.equals(task.getCreateBy())) {
             throw new ServiceException("上传任务不存在");
         }
         return task;
