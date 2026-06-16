@@ -443,6 +443,9 @@ public class PatrolController {
         area.setAreaName(blankToDefault(request.areaName(), "未命名执勤辖区"));
         area.setTeamId(blankToDefault(request.teamId(), "DEFAULT"));
         area.setTeamName(blankToDefault(request.teamName(), "默认执勤组"));
+        area.setOwnerType(blankToDefault(request.ownerType(), "TEAM"));
+        area.setUserId(parseLongOrNull(request.userId()));
+        area.setBadgeNo(blankToDefault(request.badgeNo(), ""));
         area.setBoundaryJson(JsonUtils.toJsonString(request.boundary() == null ? List.of() : request.boundary()));
         area.setRouteJson(JsonUtils.toJsonString(request.route() == null ? List.of() : request.route()));
         area.setUpdateTime(new Date());
@@ -1528,6 +1531,9 @@ public class PatrolController {
             area.getAreaName(),
             area.getTeamId(),
             area.getTeamName(),
+            blankToDefault(area.getOwnerType(), "TEAM"),
+            area.getUserId() == null ? "" : String.valueOf(area.getUserId()),
+            blankToDefault(area.getBadgeNo(), ""),
             parseGeoPoints(area.getBoundaryJson()),
             parseGeoPoints(area.getRouteJson()),
             formatDate(area.getUpdateTime() == null ? area.getCreateTime() : area.getUpdateTime())
@@ -1547,7 +1553,7 @@ public class PatrolController {
             new PatrolGeoPointVo(26.0995, 119.3104),
             new PatrolGeoPointVo(26.0979, 119.3131)
         );
-        return new PatrolAreaVo("AREA-FZ-WQ-001", "五四路核心勤务区", "PTL-GROUP-A", "第一巡逻支队 A 组", boundary, route, "-");
+        return new PatrolAreaVo("AREA-FZ-WQ-001", "五四路核心勤务区", "PTL-GROUP-A", "第一巡逻支队 A 组", "TEAM", "", "", boundary, route, "-");
     }
 
     private List<PatrolGeoPointVo> parseGeoPoints(String json) {
@@ -1556,6 +1562,13 @@ public class PatrolController {
         }
         List<PatrolGeoPointVo> points = JsonUtils.parseArray(json, PatrolGeoPointVo.class);
         return points == null ? List.of() : points;
+    }
+
+    private Long parseLongOrNull(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return Long.valueOf(value);
     }
 
     private String alertType(PatrolAlert alert) {
@@ -2240,10 +2253,10 @@ public class PatrolController {
     public record PatrolGeoPointVo(Double latitude, Double longitude) {
     }
 
-    public record PatrolAreaVo(String areaId, String areaName, String teamId, String teamName, List<PatrolGeoPointVo> boundary, List<PatrolGeoPointVo> route, String updatedAt) {
+    public record PatrolAreaVo(String areaId, String areaName, String teamId, String teamName, String ownerType, String userId, String badgeNo, List<PatrolGeoPointVo> boundary, List<PatrolGeoPointVo> route, String updatedAt) {
     }
 
-    public record PatrolAreaBo(String areaId, String areaName, String teamId, String teamName, List<PatrolGeoPointVo> boundary, List<PatrolGeoPointVo> route) {
+    public record PatrolAreaBo(String areaId, String areaName, String teamId, String teamName, String ownerType, String userId, String badgeNo, List<PatrolGeoPointVo> boundary, List<PatrolGeoPointVo> route) {
     }
 
     public record AlertVo(String alertId, String alertType, String title, String targetName, String deviceId, String officerName, String locationText, String status, String level, String confidence, String occurredAt) {

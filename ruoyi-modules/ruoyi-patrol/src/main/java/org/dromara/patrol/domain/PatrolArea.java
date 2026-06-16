@@ -42,6 +42,21 @@ public class PatrolArea extends TenantEntity {
     private String teamName;
 
     /**
+     * 归属类型（USER 个人 / TEAM 小组）
+     */
+    private String ownerType;
+
+    /**
+     * 个人归属用户ID
+     */
+    private Long userId;
+
+    /**
+     * 个人归属警号
+     */
+    private String badgeNo;
+
+    /**
      * 区域边界JSON
      */
     private String boundaryJson;

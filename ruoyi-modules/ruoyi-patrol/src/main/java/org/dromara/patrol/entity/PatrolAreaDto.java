@@ -35,6 +35,21 @@ public class PatrolAreaDto {
     private String teamName;
 
     /**
+     * 归属类型（USER 个人 / TEAM 小组）
+     */
+    private String ownerType;
+
+    /**
+     * 个人归属用户ID
+     */
+    private String userId;
+
+    /**
+     * 个人归属警号
+     */
+    private String badgeNo;
+
+    /**
      * 巡区边界
      */
     private List<PatrolGeoPointDto> boundary;

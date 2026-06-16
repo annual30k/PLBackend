@@ -204,6 +204,9 @@ create table if not exists patrol_area (
     area_name     varchar(120)  not null comment '巡区名称',
     team_id       varchar(64)   default null comment '队伍ID',
     team_name     varchar(120)  default null comment '队伍名称',
+    owner_type    varchar(16)   default 'TEAM' comment '归属类型 USER个人 TEAM小组',
+    user_id       bigint(20)    default null comment '个人归属用户ID',
+    badge_no      varchar(64)   default null comment '个人归属警号',
     boundary_json text          comment '边界点JSON',
     route_json    text          comment '路线点JSON',
     create_dept   bigint(20)    default null comment '创建部门',
@@ -212,6 +215,7 @@ create table if not exists patrol_area (
     update_by     bigint(20)    default null comment '更新者',
     update_time   datetime      default null comment '更新时间',
     del_flag      char(1)       default '0' comment '删除标志',
+    key idx_patrol_area_owner (tenant_id, owner_type, user_id, badge_no, team_id),
     primary key (area_id)
 ) engine=innodb default charset=utf8mb4 comment='巡区表';
 

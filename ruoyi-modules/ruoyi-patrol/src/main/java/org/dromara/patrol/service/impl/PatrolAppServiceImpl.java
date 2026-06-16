@@ -1067,22 +1067,62 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
 
     @Override
     public PatrolAreaDto currentPatrolArea() {
+        LoginUser loginUser = LoginHelper.getLoginUser();
         return TenantHelper.dynamic(TENANT_ID, () -> {
-            PatrolArea area = areaMapper.selectList(new LambdaQueryWrapper<PatrolArea>()
-                    .orderByDesc(PatrolArea::getUpdateTime)
-                    .orderByDesc(PatrolArea::getCreateTime))
-                .stream()
-                .findFirst()
-                .orElse(null);
+            PatrolArea area = currentAreaForUser(loginUser);
             if (area == null) {
                 return fallbackPatrolArea();
             }
-            List<PatrolGeoPointDto> boundary = JsonUtils.parseArray(area.getBoundaryJson(), PatrolGeoPointDto.class);
-            List<PatrolGeoPointDto> route = JsonUtils.parseArray(area.getRouteJson(), PatrolGeoPointDto.class);
-            return new PatrolAreaDto(area.getAreaId(), area.getAreaName(), area.getTeamId(), area.getTeamName(),
-                boundary == null ? List.of() : boundary,
-                route == null ? List.of() : route);
+            return toPatrolAreaDto(area);
         });
+    }
+
+    private PatrolArea currentAreaForUser(LoginUser loginUser) {
+        Long userId = loginUser.getUserId();
+        String badgeNo = blankToDefault(loginUser.getUsername(), "");
+        Long deptId = loginUser.getDeptId();
+        PatrolArea area = null;
+        if (userId != null) {
+            area = firstArea(new LambdaQueryWrapper<PatrolArea>()
+                .eq(PatrolArea::getOwnerType, "USER")
+                .eq(PatrolArea::getUserId, userId));
+        }
+        if (area == null && !badgeNo.isBlank()) {
+            area = firstArea(new LambdaQueryWrapper<PatrolArea>()
+                .eq(PatrolArea::getOwnerType, "USER")
+                .eq(PatrolArea::getBadgeNo, badgeNo));
+        }
+        if (area == null && deptId != null) {
+            area = firstArea(new LambdaQueryWrapper<PatrolArea>()
+                .eq(PatrolArea::getOwnerType, "TEAM")
+                .eq(PatrolArea::getTeamId, String.valueOf(deptId)));
+        }
+        return area;
+    }
+
+    private PatrolArea firstArea(LambdaQueryWrapper<PatrolArea> wrapper) {
+        return areaMapper.selectList(wrapper
+                .orderByDesc(PatrolArea::getUpdateTime)
+                .orderByDesc(PatrolArea::getCreateTime))
+            .stream()
+            .findFirst()
+            .orElse(null);
+    }
+
+    private PatrolAreaDto toPatrolAreaDto(PatrolArea area) {
+        List<PatrolGeoPointDto> boundary = JsonUtils.parseArray(area.getBoundaryJson(), PatrolGeoPointDto.class);
+        List<PatrolGeoPointDto> route = JsonUtils.parseArray(area.getRouteJson(), PatrolGeoPointDto.class);
+        return new PatrolAreaDto(
+            area.getAreaId(),
+            area.getAreaName(),
+            area.getTeamId(),
+            area.getTeamName(),
+            blankToDefault(area.getOwnerType(), "TEAM"),
+            area.getUserId() == null ? "" : String.valueOf(area.getUserId()),
+            blankToDefault(area.getBadgeNo(), ""),
+            boundary == null ? List.of() : boundary,
+            route == null ? List.of() : route
+        );
     }
 
     private PatrolAreaDto fallbackPatrolArea() {
@@ -1098,7 +1138,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             new PatrolGeoPointDto(26.0995, 119.3104),
             new PatrolGeoPointDto(26.0979, 119.3131)
         );
-        return new PatrolAreaDto("AREA-FZ-WQ-001", "五四路核心勤务区", "PTL-GROUP-A", "第一巡逻支队 A 组", boundary, route);
+        return new PatrolAreaDto("AREA-FZ-WQ-001", "五四路核心勤务区", "PTL-GROUP-A", "第一巡逻支队 A 组", "TEAM", "", "", boundary, route);
     }
 
     @Override
