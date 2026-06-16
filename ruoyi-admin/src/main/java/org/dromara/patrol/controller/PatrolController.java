@@ -1,7 +1,9 @@
 package org.dromara.patrol.controller;
 
 import cn.hutool.core.util.IdUtil;
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.DataFormatter;
@@ -45,6 +47,8 @@ import org.dromara.patrol.entity.IntercomSessionRequestDto;
 import org.dromara.patrol.entity.IntercomSignalDto;
 import org.dromara.patrol.entity.IntercomSignalRequestDto;
 import org.dromara.patrol.entity.MediaUploadTaskDto;
+import org.dromara.patrol.entity.PageEnvelope;
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.dromara.patrol.mapper.PatrolAlertAttachmentMapper;
 import org.dromara.patrol.mapper.PatrolAlertDispositionMapper;
 import org.dromara.patrol.mapper.PatrolAlertMapper;
@@ -117,6 +121,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import javax.sql.DataSource;
 
 /**
@@ -189,13 +194,19 @@ public class PatrolController {
     }
 
     @GetMapping("/devices")
-    public R<List<DeviceVo>> devices() {
-        return R.ok(deviceMapper.selectList().stream().map(this::toDeviceVo).toList());
+    public R<PageEnvelope<DeviceVo>> devices(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(deviceMapper, new LambdaQueryWrapper<PatrolDevice>()
+            .orderByDesc(PatrolDevice::getLastHeartbeatTime), page, pageSize, this::toDeviceVo));
     }
 
     @GetMapping("/devices/configs")
-    public R<List<DeviceConfigVo>> deviceConfigs() {
-        return R.ok(deviceMapper.selectList().stream().map(this::toDeviceConfigVo).toList());
+    public R<PageEnvelope<DeviceConfigVo>> deviceConfigs(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(deviceMapper, new LambdaQueryWrapper<PatrolDevice>()
+            .orderByDesc(PatrolDevice::getLastHeartbeatTime), page, pageSize, this::toDeviceConfigVo));
     }
 
     @GetMapping("/devices/{deviceId}/config")
@@ -268,13 +279,11 @@ public class PatrolController {
     }
 
     @GetMapping("/devices/commands")
-    public R<List<CommandLogVo>> deviceCommands() {
-        return R.ok(commandMapper.selectList(new LambdaQueryWrapper<PatrolDeviceCommand>()
-                .orderByDesc(PatrolDeviceCommand::getSentAt))
-            .stream()
-            .limit(50)
-            .map(this::toCommandLogVo)
-            .toList());
+    public R<PageEnvelope<CommandLogVo>> deviceCommands(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(commandMapper, new LambdaQueryWrapper<PatrolDeviceCommand>()
+            .orderByDesc(PatrolDeviceCommand::getSentAt), page, pageSize, this::toCommandLogVo));
     }
 
     @GetMapping("/devices/{deviceId}/commands")
@@ -289,13 +298,11 @@ public class PatrolController {
     }
 
     @GetMapping("/devices/events")
-    public R<List<DeviceEventVo>> deviceEvents() {
-        return R.ok(deviceEventMapper.selectList(new LambdaQueryWrapper<PatrolDeviceEvent>()
-                .orderByDesc(PatrolDeviceEvent::getOccurredAt))
-            .stream()
-            .limit(100)
-            .map(this::toDeviceEventVo)
-            .toList());
+    public R<PageEnvelope<DeviceEventVo>> deviceEvents(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(deviceEventMapper, new LambdaQueryWrapper<PatrolDeviceEvent>()
+            .orderByDesc(PatrolDeviceEvent::getOccurredAt), page, pageSize, this::toDeviceEventVo));
     }
 
     @GetMapping("/devices/{deviceId}/events")
@@ -457,8 +464,11 @@ public class PatrolController {
     }
 
     @GetMapping("/alerts")
-    public R<List<AlertVo>> alerts() {
-        return R.ok(alertMapper.selectList().stream().map(this::toAlertVo).toList());
+    public R<PageEnvelope<AlertVo>> alerts(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(alertMapper, new LambdaQueryWrapper<PatrolAlert>()
+            .orderByDesc(PatrolAlert::getOccurredAt), page, pageSize, this::toAlertVo));
     }
 
     @PostMapping("/alerts/{alertId}/ack")
@@ -513,13 +523,19 @@ public class PatrolController {
     }
 
     @GetMapping("/media")
-    public R<List<MediaVo>> media() {
-        return R.ok(mediaMapper.selectList().stream().map(this::toMediaVo).toList());
+    public R<PageEnvelope<MediaVo>> media(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(mediaMapper, new LambdaQueryWrapper<PatrolMedia>()
+            .orderByDesc(PatrolMedia::getCapturedAt)
+            .orderByDesc(PatrolMedia::getCreateTime), page, pageSize, this::toMediaVo));
     }
 
     @GetMapping("/media/upload-tasks")
-    public R<List<MediaUploadTaskDto>> mediaUploadTasks() {
-        return R.ok(patrolAppService.mediaUploadTasks(1, 200).getItems());
+    public R<PageEnvelope<MediaUploadTaskDto>> mediaUploadTasks(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(patrolAppService.mediaUploadTasks(normalizePage(page), normalizePageSize(pageSize)));
     }
 
     @PostMapping("/media/upload-tasks/cleanup")
@@ -545,14 +561,16 @@ public class PatrolController {
     }
 
     @GetMapping("/daily-reports")
-    public R<List<DailyReportVo>> dailyReports(
+    public R<PageEnvelope<DailyReportVo>> dailyReports(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize,
         @RequestParam(defaultValue = "") String missionId,
         @RequestParam(defaultValue = "") String status) {
         LambdaQueryWrapper<PatrolDailyReport> wrapper = new LambdaQueryWrapper<PatrolDailyReport>()
             .like(missionId != null && !missionId.isBlank(), PatrolDailyReport::getMissionId, missionId)
             .eq(status != null && !status.isBlank(), PatrolDailyReport::getStatus, status)
             .orderByDesc(PatrolDailyReport::getGeneratedAt);
-        return R.ok(dailyReportMapper.selectList(wrapper).stream().map(this::toDailyReportVo).toList());
+        return R.ok(pageOf(dailyReportMapper, wrapper, page, pageSize, this::toDailyReportVo));
     }
 
     @GetMapping("/daily-reports/{reportId}")
@@ -589,12 +607,11 @@ public class PatrolController {
     }
 
     @GetMapping("/versions")
-    public R<List<AppVersionVo>> versions() {
-        return R.ok(appVersionMapper.selectList(new LambdaQueryWrapper<PatrolAppVersion>()
-                .orderByDesc(PatrolAppVersion::getVersionCode))
-            .stream()
-            .map(this::toAppVersionVo)
-            .toList());
+    public R<PageEnvelope<AppVersionVo>> versions(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(appVersionMapper, new LambdaQueryWrapper<PatrolAppVersion>()
+            .orderByDesc(PatrolAppVersion::getVersionCode), page, pageSize, this::toAppVersionVo));
     }
 
     @PostMapping(value = "/versions/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -675,12 +692,11 @@ public class PatrolController {
     }
 
     @GetMapping("/firmware-versions")
-    public R<List<FirmwareVersionVo>> firmwareVersions() {
-        return R.ok(firmwareVersionMapper.selectList(new LambdaQueryWrapper<PatrolFirmwareVersion>()
-                .orderByDesc(PatrolFirmwareVersion::getVersionCode))
-            .stream()
-            .map(this::toFirmwareVersionVo)
-            .toList());
+    public R<PageEnvelope<FirmwareVersionVo>> firmwareVersions(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(firmwareVersionMapper, new LambdaQueryWrapper<PatrolFirmwareVersion>()
+            .orderByDesc(PatrolFirmwareVersion::getVersionCode), page, pageSize, this::toFirmwareVersionVo));
     }
 
     @PostMapping(value = "/firmware-versions/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -776,21 +792,19 @@ public class PatrolController {
     }
 
     @GetMapping("/firmware-upgrade-tasks")
-    public R<List<FirmwareUpgradeTaskVo>> firmwareUpgradeTasks() {
-        return R.ok(firmwareUpgradeTaskMapper.selectList(new LambdaQueryWrapper<PatrolFirmwareUpgradeTask>()
-                .orderByDesc(PatrolFirmwareUpgradeTask::getStartedAt))
-            .stream()
-            .map(this::toFirmwareUpgradeTaskVo)
-            .toList());
+    public R<PageEnvelope<FirmwareUpgradeTaskVo>> firmwareUpgradeTasks(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(firmwareUpgradeTaskMapper, new LambdaQueryWrapper<PatrolFirmwareUpgradeTask>()
+            .orderByDesc(PatrolFirmwareUpgradeTask::getStartedAt), page, pageSize, this::toFirmwareUpgradeTaskVo));
     }
 
     @GetMapping("/sos")
-    public R<List<SosVo>> sos() {
-        return R.ok(sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
-                .orderByDesc(PatrolSosEvent::getCreateTime))
-            .stream()
-            .map(this::toSosVo)
-            .toList());
+    public R<PageEnvelope<SosVo>> sos(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(sosEventMapper, new LambdaQueryWrapper<PatrolSosEvent>()
+            .orderByDesc(PatrolSosEvent::getCreateTime), page, pageSize, this::toSosVo));
     }
 
     @GetMapping("/sos/{sosId}/timeline")
@@ -914,13 +928,11 @@ public class PatrolController {
     }
 
     @GetMapping("/messages")
-    public R<List<MessageVo>> messages() {
-        return R.ok(messageMapper.selectList(new LambdaQueryWrapper<PatrolMessage>()
-                .orderByDesc(PatrolMessage::getSentAt))
-            .stream()
-            .limit(50)
-            .map(this::toMessageVo)
-            .toList());
+    public R<PageEnvelope<MessageVo>> messages(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(messageMapper, new LambdaQueryWrapper<PatrolMessage>()
+            .orderByDesc(PatrolMessage::getSentAt), page, pageSize, this::toMessageVo));
     }
 
     @GetMapping("/messages/{messageId}/receipts")
@@ -934,12 +946,11 @@ public class PatrolController {
     }
 
     @GetMapping("/control/persons")
-    public R<List<ControlPersonVo>> controlPersons() {
-        return R.ok(controlPersonMapper.selectList(new LambdaQueryWrapper<PatrolControlPerson>()
-                .orderByDesc(PatrolControlPerson::getCreateTime))
-            .stream()
-            .map(this::toControlPersonVo)
-            .toList());
+    public R<PageEnvelope<ControlPersonVo>> controlPersons(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(controlPersonMapper, new LambdaQueryWrapper<PatrolControlPerson>()
+            .orderByDesc(PatrolControlPerson::getCreateTime), page, pageSize, this::toControlPersonVo));
     }
 
     @PostMapping("/control/persons")
@@ -1049,12 +1060,11 @@ public class PatrolController {
     }
 
     @GetMapping("/control/vehicles")
-    public R<List<ControlVehicleVo>> controlVehicles() {
-        return R.ok(controlVehicleMapper.selectList(new LambdaQueryWrapper<PatrolControlVehicle>()
-                .orderByDesc(PatrolControlVehicle::getCreateTime))
-            .stream()
-            .map(this::toControlVehicleVo)
-            .toList());
+    public R<PageEnvelope<ControlVehicleVo>> controlVehicles(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(controlVehicleMapper, new LambdaQueryWrapper<PatrolControlVehicle>()
+            .orderByDesc(PatrolControlVehicle::getCreateTime), page, pageSize, this::toControlVehicleVo));
     }
 
     @PostMapping("/control/vehicles")
@@ -1129,13 +1139,11 @@ public class PatrolController {
     }
 
     @GetMapping("/system/audit-logs")
-    public R<List<AuditLogVo>> auditLogs() {
-        return R.ok(auditLogMapper.selectList(new LambdaQueryWrapper<PatrolAuditLog>()
-                .orderByDesc(PatrolAuditLog::getOccurredAt))
-            .stream()
-            .limit(100)
-            .map(this::toAuditLogVo)
-            .toList());
+    public R<PageEnvelope<AuditLogVo>> auditLogs(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(auditLogMapper, new LambdaQueryWrapper<PatrolAuditLog>()
+            .orderByDesc(PatrolAuditLog::getOccurredAt), page, pageSize, this::toAuditLogVo));
     }
 
     @GetMapping("/system/health")
@@ -1172,6 +1180,22 @@ public class PatrolController {
             "algorithm", "第三方人脸比对与车牌 OCR",
             "policeCallIntegration", "预留 110 接处警平台接口"
         ));
+    }
+
+    private <E, V> PageEnvelope<V> pageOf(BaseMapper<E> mapper, Wrapper<E> wrapper, int page, int pageSize, Function<E, V> converter) {
+        int current = normalizePage(page);
+        int size = normalizePageSize(pageSize);
+        Page<E> result = mapper.selectPage(new Page<>(current, size), wrapper);
+        List<V> items = result.getRecords().stream().map(converter).toList();
+        return new PageEnvelope<>(items, current, size, result.getTotal(), current * (long) size < result.getTotal());
+    }
+
+    private int normalizePage(int page) {
+        return Math.max(page, 1);
+    }
+
+    private int normalizePageSize(int pageSize) {
+        return Math.min(Math.max(pageSize, 1), 100);
     }
 
     private SystemHealthVo apiHealth() {
