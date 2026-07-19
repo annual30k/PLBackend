@@ -36,6 +36,16 @@ public class PatrolSosEvent extends TenantEntity {
      */
     private String message;
 
+    private Long userId;
+
+    private String officerName;
+
+    private String badgeNo;
+
+    private String deptName;
+
+    private String deviceId;
+
     /**
      * 纬度
      */

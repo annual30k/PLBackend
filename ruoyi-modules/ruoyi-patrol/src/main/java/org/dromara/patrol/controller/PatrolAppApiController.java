@@ -12,11 +12,13 @@ import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.ApiEnvelope;
 import org.dromara.patrol.entity.AuthSessionDto;
 import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
+import org.dromara.patrol.entity.CerebellumPlateAlertRequestDto;
 import org.dromara.patrol.entity.CerebellumDailyReportRequestDto;
 import org.dromara.patrol.entity.CerebellumSettingsDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
+import org.dromara.patrol.entity.DeviceCommandAckRequestDto;
 import org.dromara.patrol.entity.DeviceControlResultDto;
 import org.dromara.patrol.entity.DeviceStatusDto;
 import org.dromara.patrol.entity.DeviceWifiStateDto;
@@ -41,6 +43,7 @@ import org.dromara.patrol.entity.MediaUploadTaskDto;
 import org.dromara.patrol.entity.PageEnvelope;
 import org.dromara.patrol.entity.PatrolAreaDto;
 import org.dromara.patrol.entity.PatrolMessageDto;
+import org.dromara.patrol.entity.PendingDeviceCommandDto;
 import org.dromara.patrol.entity.ScannedDeviceDto;
 import org.dromara.patrol.entity.SosEventDto;
 import org.dromara.patrol.entity.StreamRelayRequestDto;
@@ -48,6 +51,7 @@ import org.dromara.patrol.entity.StreamRelayStateDto;
 import org.dromara.patrol.entity.TransferRequestDto;
 import org.dromara.patrol.entity.UserProfileDto;
 import org.dromara.patrol.entity.VersionCheckDto;
+import org.dromara.patrol.entity.VehicleLibraryPackageDto;
 import org.dromara.patrol.mapper.PatrolDailyReportMapper;
 import org.dromara.patrol.service.CerebellumAccessGuard;
 import org.dromara.patrol.service.IPatrolAppService;
@@ -134,6 +138,20 @@ public class PatrolAppApiController {
     @PostMapping("/devices/{deviceId}/commands")
     public ApiEnvelope<DeviceStatusDto> sendDeviceCommand(@PathVariable String deviceId, @RequestBody DeviceCommandRequestDto request) {
         return ok(patrolAppService.sendDeviceCommand(deviceId, request));
+    }
+
+    @GetMapping("/devices/{deviceId}/commands/pending")
+    public ApiEnvelope<List<PendingDeviceCommandDto>> pendingDeviceCommands(
+        @PathVariable String deviceId,
+        @RequestParam(defaultValue = "20") int limit) {
+        return ok(patrolAppService.pendingDeviceCommands(deviceId, limit));
+    }
+
+    @PostMapping("/devices/commands/{commandId}/ack")
+    public ApiEnvelope<DeviceControlResultDto> acknowledgeDeviceCommand(
+        @PathVariable String commandId,
+        @RequestBody DeviceCommandAckRequestDto request) {
+        return ok(patrolAppService.acknowledgeDeviceCommand(commandId, request));
     }
 
     @GetMapping("/devices/{deviceId}/capabilities")
@@ -401,6 +419,32 @@ public class PatrolAppApiController {
             return unauthorized(response);
         }
         return ok(patrolAppService.reportCerebellumFaceAlert(request));
+    }
+
+    @SaIgnore
+    @GetMapping("/cerebellum/vehicle-library")
+    public ApiEnvelope<VehicleLibraryPackageDto> vehicleLibraryPackage(
+        HttpServletRequest request,
+        HttpServletResponse response,
+        @RequestParam(required = false) String deviceId,
+        @RequestParam(required = false) String currentVersion,
+        @RequestParam(defaultValue = "false") boolean force) {
+        if (!cerebellumAccessGuard.isAllowed(request)) {
+            return unauthorized(response);
+        }
+        return ok(patrolAppService.vehicleLibraryPackage(deviceId, currentVersion, force));
+    }
+
+    @SaIgnore
+    @PostMapping("/cerebellum/plate-alerts")
+    public ApiEnvelope<AlertDto> reportCerebellumPlateAlert(
+        HttpServletRequest httpRequest,
+        HttpServletResponse response,
+        @RequestBody CerebellumPlateAlertRequestDto request) {
+        if (!cerebellumAccessGuard.isAllowed(httpRequest)) {
+            return unauthorized(response);
+        }
+        return ok(patrolAppService.reportCerebellumPlateAlert(request));
     }
 
     @SaIgnore

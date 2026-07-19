@@ -24,6 +24,7 @@ import org.dromara.patrol.domain.PatrolAppVersion;
 import org.dromara.patrol.domain.PatrolArea;
 import org.dromara.patrol.domain.PatrolAuditLog;
 import org.dromara.patrol.domain.PatrolControlPerson;
+import org.dromara.patrol.domain.PatrolControlVehicle;
 import org.dromara.patrol.domain.PatrolCerebellumConfig;
 import org.dromara.patrol.domain.PatrolDevice;
 import org.dromara.patrol.domain.PatrolDeviceBinding;
@@ -42,10 +43,12 @@ import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.AuthSessionDto;
 import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
+import org.dromara.patrol.entity.CerebellumPlateAlertRequestDto;
 import org.dromara.patrol.entity.CerebellumSettingsDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
+import org.dromara.patrol.entity.DeviceCommandAckRequestDto;
 import org.dromara.patrol.entity.DeviceControlResultDto;
 import org.dromara.patrol.entity.DeviceStatusDto;
 import org.dromara.patrol.entity.DeviceWifiStateDto;
@@ -72,6 +75,7 @@ import org.dromara.patrol.entity.PageEnvelope;
 import org.dromara.patrol.entity.PatrolAreaDto;
 import org.dromara.patrol.entity.PatrolGeoPointDto;
 import org.dromara.patrol.entity.PatrolMessageDto;
+import org.dromara.patrol.entity.PendingDeviceCommandDto;
 import org.dromara.patrol.entity.ScannedDeviceDto;
 import org.dromara.patrol.entity.SosEventDto;
 import org.dromara.patrol.entity.StreamRelayRequestDto;
@@ -80,6 +84,8 @@ import org.dromara.patrol.entity.TransferRequestDto;
 import org.dromara.patrol.entity.UploadAttachmentDto;
 import org.dromara.patrol.entity.UserProfileDto;
 import org.dromara.patrol.entity.VersionCheckDto;
+import org.dromara.patrol.entity.VehicleLibraryPackageDto;
+import org.dromara.patrol.entity.VehicleLibraryRecordDto;
 import org.dromara.patrol.mapper.PatrolAppVersionMapper;
 import org.dromara.patrol.mapper.PatrolAlertAttachmentMapper;
 import org.dromara.patrol.mapper.PatrolAlertDispositionMapper;
@@ -87,6 +93,7 @@ import org.dromara.patrol.mapper.PatrolAlertMapper;
 import org.dromara.patrol.mapper.PatrolAreaMapper;
 import org.dromara.patrol.mapper.PatrolAuditLogMapper;
 import org.dromara.patrol.mapper.PatrolControlPersonMapper;
+import org.dromara.patrol.mapper.PatrolControlVehicleMapper;
 import org.dromara.patrol.mapper.PatrolCerebellumConfigMapper;
 import org.dromara.patrol.mapper.PatrolDeviceMapper;
 import org.dromara.patrol.mapper.PatrolDeviceCommandMapper;
@@ -131,8 +138,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -181,6 +190,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private final PatrolFirmwareVersionMapper firmwareVersionMapper;
     private final PatrolFirmwareUpgradeTaskMapper firmwareUpgradeTaskMapper;
     private final PatrolControlPersonMapper controlPersonMapper;
+    private final PatrolControlVehicleMapper controlVehicleMapper;
     private final PatrolCerebellumConfigMapper cerebellumConfigMapper;
     private final PatrolRealtimePublisher realtimePublisher;
 
@@ -395,6 +405,80 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public List<PendingDeviceCommandDto> pendingDeviceCommands(String deviceId, int limit) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            requireCurrentUserDeviceBinding(deviceId);
+            int safeLimit = Math.max(1, Math.min(limit, 50));
+            List<PatrolDeviceCommand> commands = commandMapper.selectList(new LambdaQueryWrapper<PatrolDeviceCommand>()
+                    .eq(PatrolDeviceCommand::getDeviceId, deviceId)
+                    .in(PatrolDeviceCommand::getStatus, List.of("QUEUED", "DELIVERED"))
+                    .orderByAsc(PatrolDeviceCommand::getSentAt))
+                .stream()
+                .limit(safeLimit)
+                .toList();
+            Date deliveredAt = new Date();
+            for (PatrolDeviceCommand command : commands) {
+                if ("QUEUED".equals(command.getStatus())) {
+                    command.setStatus("DELIVERED");
+                    command.setResultMessage("Android 已拉取，等待设备执行回执");
+                    commandMapper.updateById(command);
+                }
+            }
+            if (!commands.isEmpty()) {
+                saveDeviceEvent(deviceId, "COMMAND_DELIVERY", "INFO", "平台指令已投递 Android", "本次投递 " + commands.size() + " 条，时间=" + deliveredAt);
+            }
+            return commands.stream()
+                .map(command -> new PendingDeviceCommandDto(
+                    command.getCommandId(),
+                    command.getDeviceId(),
+                    command.getCommand(),
+                    command.getRequestId(),
+                    command.getOperatorId(),
+                    command.getSentAt() == null ? 0L : command.getSentAt().getTime()))
+                .toList();
+        });
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public DeviceControlResultDto acknowledgeDeviceCommand(String commandId, DeviceCommandAckRequestDto request) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            PatrolDeviceCommand command = commandMapper.selectById(commandId);
+            if (command == null) {
+                throw new ServiceException("设备指令不存在：" + commandId);
+            }
+            String requestDeviceId = blankToDefault(request == null ? null : request.getDeviceId(), command.getDeviceId());
+            if (!command.getDeviceId().equals(requestDeviceId)) {
+                throw new ServiceException("设备指令与回执设备不匹配");
+            }
+            requireCurrentUserDeviceBinding(command.getDeviceId());
+            String requestedStatus = blankToDefault(request == null ? null : request.getStatus(), "FAILED").trim().toUpperCase();
+            String status = List.of("ACKED", "SUCCEEDED", "SUCCESS").contains(requestedStatus) ? "ACKED" : "FAILED";
+            String message = blankToDefault(request == null ? null : request.getMessage(), "ACKED".equals(status) ? "设备执行成功" : "设备执行失败");
+            command.setStatus(status);
+            command.setResultMessage(message);
+            command.setAckAt(new Date());
+            commandMapper.updateById(command);
+
+            PatrolDevice device = getOrCreateDevice(command.getDeviceId());
+            if ("ACKED".equals(status)) {
+                applyAcknowledgedDeviceCommand(device, command.getCommand());
+            }
+            device.setOnline(true);
+            device.setCloudConnected(true);
+            device.setLastHeartbeatTime(new Date());
+            deviceMapper.insertOrUpdate(device);
+            cacheDevice(device);
+            saveDeviceEvent(command.getDeviceId(), "COMMAND_ACK", "ACKED".equals(status) ? "INFO" : "ERROR", "设备指令真实回执", command.getCommand() + "：" + message);
+            saveAudit("COMMAND", "设备回执：" + command.getCommand(), commandId, "ACKED".equals(status) ? "SUCCESS" : "FAILED");
+            realtimePublisher.publish("DEVICE_COMMAND_ACK", "devices", "设备指令回执", command.getDeviceId() + " " + command.getCommand() + " " + status, commandId,
+                realtimePublisher.payload("commandId", commandId, "deviceId", command.getDeviceId(), "command", command.getCommand(), "status", status, "message", message));
+            return new DeviceControlResultDto("ACKED".equals(status), status, message);
+        });
+    }
+
+    @Override
     public DeviceCapabilitiesDto deviceCapabilities(String deviceId) {
         return TenantHelper.dynamic(TENANT_ID, () -> toCapabilitiesDto(getOrCreateDeviceConfig(deviceId)));
     }
@@ -448,12 +532,12 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     public DeviceControlResultDto startRealtimeAudioSync(String deviceId) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             PatrolDeviceConfig config = getOrCreateDeviceConfig(deviceId);
-            config.setRealtimeAudioSyncing(true);
-            deviceConfigMapper.insertOrUpdate(config);
-            saveDeviceEvent(deviceId, "REALTIME_AUDIO", "INFO", "实时音频同步开始", "App端已开启实时音频同步");
-            realtimePublisher.publish("DEVICE_EVENT", "devices", "实时音频同步开始", deviceId + " 已开启实时音频同步", deviceId,
-                realtimePublisher.payload("deviceId", deviceId, "realtimeAudioSyncing", true));
-            return new DeviceControlResultDto(true, "STARTED", "实时音频同步已开始");
+            if (Boolean.TRUE.equals(config.getRealtimeAudioSyncing()) || Boolean.TRUE.equals(config.getSupportsRealtimeAudio())) {
+                config.setRealtimeAudioSyncing(false);
+                config.setSupportsRealtimeAudio(false);
+                deviceConfigMapper.insertOrUpdate(config);
+            }
+            return new DeviceControlResultDto(false, "UNSUPPORTED", "当前硬件 SDK 未开放实时双向音频接口");
         });
     }
 
@@ -462,12 +546,12 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     public DeviceControlResultDto stopRealtimeAudioSync(String deviceId) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             PatrolDeviceConfig config = getOrCreateDeviceConfig(deviceId);
-            config.setRealtimeAudioSyncing(false);
-            deviceConfigMapper.insertOrUpdate(config);
-            saveDeviceEvent(deviceId, "REALTIME_AUDIO", "INFO", "实时音频同步停止", "App端已停止实时音频同步");
-            realtimePublisher.publish("DEVICE_EVENT", "devices", "实时音频同步停止", deviceId + " 已停止实时音频同步", deviceId,
-                realtimePublisher.payload("deviceId", deviceId, "realtimeAudioSyncing", false));
-            return new DeviceControlResultDto(true, "STOPPED", "实时音频同步已停止");
+            if (Boolean.TRUE.equals(config.getRealtimeAudioSyncing()) || Boolean.TRUE.equals(config.getSupportsRealtimeAudio())) {
+                config.setRealtimeAudioSyncing(false);
+                config.setSupportsRealtimeAudio(false);
+                deviceConfigMapper.insertOrUpdate(config);
+            }
+            return new DeviceControlResultDto(false, "UNSUPPORTED", "当前硬件 SDK 未开放实时双向音频接口");
         });
     }
 
@@ -531,13 +615,20 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
 
     @Override
     public PageEnvelope<AlertDto> alerts(int page, int pageSize) {
-        return TenantHelper.dynamic(TENANT_ID, () -> page(alertMapper.selectList().stream().map(this::toAlertDto).toList(), page, pageSize));
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            Set<String> boundDeviceIds = currentBoundDeviceIds();
+            return page(alertMapper.selectList().stream()
+                .filter(alert -> isAlertVisibleToCurrentUser(alert, boundDeviceIds))
+                .map(this::toAlertDto)
+                .toList(), page, pageSize);
+        });
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public AlertDto acknowledgeAlert(String alertId) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
+            requireVisibleAlert(alertId);
             AlertDto alert = updateAlert(alertId, "HANDLING", null, null, null);
             saveAlertDisposition(alertId, "ACK", "HANDLING", null, 0);
             realtimePublisher.publish("ALERT_UPDATED", "alerts", "预警已确认", alertId + " 已进入处置中", alertId,
@@ -550,6 +641,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Transactional(rollbackFor = Exception.class)
     public AlertDto closeAlert(String alertId, AlertCloseRequestDto request) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
+            requireVisibleAlert(alertId);
             AlertDto alert = updateAlert(alertId, "CLOSED", request.getResult() + "：" + request.getNote(), request.getResult(), request.getOperatorId());
             saveAlertAttachments(alertId, request.getAttachments());
             saveAlertDisposition(alertId, "CLOSE", request.getResult(), request.getNote(), request.getAttachments() == null ? 0 : request.getAttachments().size());
@@ -921,6 +1013,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 saveLocationTrack(device, request);
             }
             deviceMapper.insertOrUpdate(device);
+            // 心跳也是设备恢复联网后的最终一致性入口。首次绑定时若平台短暂不可用，
+            // Android 会补传心跳；这里同步修复用户与设备绑定，避免 UI 显示云端在线但
+            // 告警仍因缺少绑定关系无法路由到当前警员。
+            saveDeviceBinding(device);
             if (!request.isOnline()) {
                 saveDeviceEvent(device.getDeviceId(), "OFFLINE", "WARNING", "设备离线", "心跳上报 offline");
             } else if (request.getBatteryPercent() < 20) {
@@ -939,15 +1035,15 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Transactional(rollbackFor = Exception.class)
     public PageEnvelope<PatrolMessageDto> messages(String targetId, int page, int pageSize) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
-            String safeTargetId = blankToDefault(targetId, LoginHelper.getUsername());
+            Set<String> recipientKeys = currentMessageRecipientKeys();
             List<PatrolMessageDto> items = new ArrayList<>();
             for (PatrolMessage message : messageMapper.selectList(new LambdaQueryWrapper<PatrolMessage>().orderByDesc(PatrolMessage::getSentAt))) {
-                PatrolMessageReceipt receipt = visibleReceipt(message.getMessageId(), safeTargetId);
+                PatrolMessageReceipt receipt = visibleReceipt(message.getMessageId(), recipientKeys);
                 if (receipt != null) {
                     markReceiptDelivered(receipt);
                     PatrolMessage syncedMessage = syncMessageDeliverySummary(message.getMessageId());
                     items.add(toMessageDto(syncedMessage == null ? message : syncedMessage, receipt));
-                } else if (isMessageVisible(message, safeTargetId)) {
+                } else if (!hasMessageReceipts(message.getMessageId()) && isLegacyMessageVisible(message, recipientKeys)) {
                     items.add(toMessageDto(message, null));
                 }
             }
@@ -963,7 +1059,8 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             if (message == null) {
                 throw new ServiceException("消息不存在");
             }
-            PatrolMessageReceipt receipt = visibleReceipt(messageId, LoginHelper.getUsername());
+            Set<String> recipientKeys = currentMessageRecipientKeys();
+            PatrolMessageReceipt receipt = visibleReceipt(messageId, recipientKeys);
             if (receipt != null) {
                 receipt.setDeliveryStatus("READ");
                 if (receipt.getDeliveredAt() == null) {
@@ -974,6 +1071,9 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 messageReceiptMapper.updateById(receipt);
                 message = syncMessageDeliverySummary(messageId);
             } else {
+                if (hasMessageReceipts(messageId) || !isLegacyMessageVisible(message, recipientKeys)) {
+                    throw new ServiceException("无权读取该指挥消息");
+                }
                 int total = Math.max(value(message.getTotalCount(), 0), 1);
                 int read = Math.min(value(message.getReadCount(), 0) + 1, total);
                 message.setReadCount(read);
@@ -1195,40 +1295,57 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     private PatrolAreaDto fallbackPatrolArea() {
-        List<PatrolGeoPointDto> boundary = List.of(
-            new PatrolGeoPointDto(26.1048, 119.3009),
-            new PatrolGeoPointDto(26.1044, 119.3137),
-            new PatrolGeoPointDto(26.0977, 119.3145),
-            new PatrolGeoPointDto(26.0968, 119.3024)
-        );
-        List<PatrolGeoPointDto> route = List.of(
-            new PatrolGeoPointDto(26.1036, 119.3025),
-            new PatrolGeoPointDto(26.1017, 119.3065),
-            new PatrolGeoPointDto(26.0995, 119.3104),
-            new PatrolGeoPointDto(26.0979, 119.3131)
-        );
-        return new PatrolAreaDto("AREA-FZ-WQ-001", "五四路核心勤务区", "PTL-GROUP-A", "第一巡逻支队 A 组", "TEAM", "", "", boundary, route);
+        return new PatrolAreaDto("", "未配置巡区", "", "", "UNASSIGNED", "", "", List.of(), List.of());
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public SosEventDto activateSos(GpsLocationDto location) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
+            LoginUser loginUser = LoginHelper.getLoginUser();
+            String clientEventId = normalizedClientSosId(location.getClientEventId());
+            if (!clientEventId.isBlank()) {
+                PatrolSosEvent existing = sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
+                        .eq(PatrolSosEvent::getSosId, clientEventId)
+                        .eq(PatrolSosEvent::getUserId, loginUser.getUserId()))
+                    .stream()
+                    .findFirst()
+                    .orElse(null);
+                if (existing != null) {
+                    return toSosDto(existing);
+                }
+            }
+            PatrolSosEvent active = sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
+                    .eq(PatrolSosEvent::getUserId, loginUser.getUserId())
+                    .eq(PatrolSosEvent::getPhase, "ACTIVE")
+                    .orderByDesc(PatrolSosEvent::getCreateTime))
+                .stream()
+                .findFirst()
+                .orElse(null);
+            if (active != null) {
+                return toSosDto(active);
+            }
             PatrolSosEvent event = new PatrolSosEvent();
             event.setTenantId(TENANT_ID);
-            event.setSosId("SOS-" + Instant.now().toEpochMilli());
+            event.setSosId(clientEventId.isBlank() ? "SOS-" + Instant.now().toEpochMilli() : clientEventId);
             event.setPhase("ACTIVE");
             event.setMessage("紧急上报已激活");
+            event.setUserId(loginUser.getUserId());
+            event.setOfficerName(blankToDefault(loginUser.getNickname(), loginUser.getUsername()));
+            event.setBadgeNo(blankToDefault(loginUser.getUsername(), ""));
+            event.setDeptName(blankToDefault(loginUser.getDeptName(), ""));
+            event.setDeviceId(blankToDefault(location.getDeviceId(), ""));
             event.setLatitude(location.getLatitude());
             event.setLongitude(location.getLongitude());
             event.setAccuracyMeters(location.getAccuracyMeters());
             event.setAddress(location.getAddress());
             event.setRecordingAudio(true);
-            event.setBackupEtaMinutes(4);
+            event.setBackupEtaMinutes(null);
             event.setDelFlag("0");
             sosEventMapper.insert(event);
+            saveAudit("SOS", "App激活SOS求助", event.getSosId(), "SUCCESS");
             realtimePublisher.publish("SOS_ACTIVE", "sos", "SOS求助已激活", blankToDefault(location.getAddress(), "未知位置"), event.getSosId(),
-                realtimePublisher.payload("sosId", event.getSosId(), "latitude", event.getLatitude(), "longitude", event.getLongitude(), "address", event.getAddress(), "phase", event.getPhase()));
+                realtimePublisher.payload("sosId", event.getSosId(), "deviceId", event.getDeviceId(), "badgeNo", event.getBadgeNo(), "officerName", event.getOfficerName(), "latitude", event.getLatitude(), "longitude", event.getLongitude(), "address", event.getAddress(), "phase", event.getPhase()));
             return toSosDto(event);
         });
     }
@@ -1237,6 +1354,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     public SosEventDto cancelSos() {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             PatrolSosEvent event = sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
+                    .eq(PatrolSosEvent::getUserId, LoginHelper.getUserId())
                     .eq(PatrolSosEvent::getPhase, "ACTIVE")
                     .orderByDesc(PatrolSosEvent::getCreateTime))
                 .stream()
@@ -1418,10 +1536,26 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     public AlertDto reportCerebellumFaceAlert(CerebellumFaceAlertRequestDto request) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             String deviceId = blankToDefault(request.getDeviceId(), DEFAULT_DEVICE_ID);
-            String personId = blankToDefault(request.getPersonId(), "UNKNOWN");
-            String alertId = blankToDefault(request.getAlertId(), "FACE-" + deviceId + "-" + personId + "-" + UUID.randomUUID());
-            String displayName = blankToDefault(request.getDisplayName(), personId);
-            String riskLevel = blankToDefault(request.getRiskLevel(), "MEDIUM");
+            String personId = blankToDefault(request.getPersonId(), "").trim();
+            if (personId.isBlank()) {
+                throw new ServiceException("人脸识别布控编号不能为空");
+            }
+            String requestedAlertId = blankToDefault(request.getAlertId(), "").trim();
+            AlertDto replayed = replayedCerebellumAlert(requestedAlertId, deviceId);
+            if (replayed != null) {
+                return replayed;
+            }
+            Date now = new Date();
+            PatrolControlPerson controlled = controlPersonMapper.selectOne(new LambdaQueryWrapper<PatrolControlPerson>()
+                .eq(PatrolControlPerson::getControlId, personId)
+                .eq(PatrolControlPerson::getStatus, "ENABLED")
+                .and(wrapper -> wrapper.isNull(PatrolControlPerson::getExpiresAt).or().gt(PatrolControlPerson::getExpiresAt, now)));
+            if (controlled == null) {
+                throw new ServiceException("人员未命中有效布控库：" + personId);
+            }
+            String alertId = blankToDefault(requestedAlertId, "FACE-" + deviceId + "-" + personId + "-" + UUID.randomUUID());
+            String displayName = blankToDefault(controlled.getName(), blankToDefault(request.getDisplayName(), personId));
+            String riskLevel = blankToDefault(controlled.getRiskLevel(), blankToDefault(request.getRiskLevel(), "MEDIUM"));
             String level = "HIGH".equalsIgnoreCase(riskLevel) ? "HIGH" : "WARNING";
             Double similarity = request.getAverageSimilarity();
             String confidence = similarity == null ? "-" : Math.round(similarity * 100) + "%";
@@ -1436,7 +1570,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             alert.setConfidence(confidence);
             alert.setDescription("边缘小脑多帧确认候选，人员=" + displayName
                 + "，编号=" + personId
-                + "，类别=" + blankToDefault(request.getCategory(), "-")
+                + "，类别=" + blankToDefault(controlled.getCategory(), blankToDefault(request.getCategory(), "-"))
                 + "，风险=" + riskLevel
                 + "，命中帧=" + value(request.getVoteCount(), 0) + "/" + value(request.getConfirmFrames(), 0)
                 + "，窗口=" + value(request.getWindowSeconds(), 0D) + "秒"
@@ -1451,6 +1585,96 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             saveAudit("ALERT", "小脑上报重点人员疑似命中", alertId, "SUCCESS");
             realtimePublisher.publish("ALERT_CREATED", "alerts", alert.getTitle(), alert.getDescription(), alertId,
                 realtimePublisher.payload("alertId", alertId, "deviceId", deviceId, "personId", personId, "status", alert.getStatus(), "level", level));
+            return toAlertDto(alert);
+        });
+    }
+
+    @Override
+    public VehicleLibraryPackageDto vehicleLibraryPackage(String deviceId, String currentVersion, boolean force) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            Date now = new Date();
+            List<PatrolControlVehicle> vehicles = controlVehicleMapper.selectList(new LambdaQueryWrapper<PatrolControlVehicle>()
+                .eq(PatrolControlVehicle::getStatus, "ENABLED")
+                .and(wrapper -> wrapper.isNull(PatrolControlVehicle::getExpiresAt).or().gt(PatrolControlVehicle::getExpiresAt, now))
+                .orderByAsc(PatrolControlVehicle::getControlId));
+            String version = vehicleLibraryVersion(vehicles);
+            if (!force && version.equals(currentVersion)) {
+                return new VehicleLibraryPackageDto(version, "PLBackend", true, blankToDefault(deviceId, DEFAULT_DEVICE_ID), true, Instant.now().toEpochMilli(), List.of());
+            }
+            List<VehicleLibraryRecordDto> records = vehicles.stream()
+                .map(vehicle -> new VehicleLibraryRecordDto(
+                    vehicle.getControlId(),
+                    normalizePlate(vehicle.getPlateNo()),
+                    vehicle.getVehicleDesc(),
+                    vehicle.getVehicleType(),
+                    vehicle.getRiskLevel(),
+                    vehicle.getStatus(),
+                    vehicle.getSource(),
+                    vehicle.getExpiresAt()))
+                .toList();
+            return new VehicleLibraryPackageDto(version, "PLBackend", true, blankToDefault(deviceId, DEFAULT_DEVICE_ID), false, Instant.now().toEpochMilli(), records);
+        });
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public AlertDto reportCerebellumPlateAlert(CerebellumPlateAlertRequestDto request) {
+        return TenantHelper.dynamic(TENANT_ID, () -> {
+            String plateNo = normalizePlate(request.getPlateNumber());
+            if (plateNo.isBlank()) {
+                throw new ServiceException("车牌识别结果不能为空");
+            }
+            String deviceId = blankToDefault(request.getDeviceId(), DEFAULT_DEVICE_ID);
+            String requestedAlertId = blankToDefault(request.getAlertId(), "").trim();
+            AlertDto replayed = replayedCerebellumAlert(requestedAlertId, deviceId);
+            if (replayed != null) {
+                return replayed;
+            }
+            Date now = new Date();
+            PatrolControlVehicle controlled = controlVehicleMapper.selectList(new LambdaQueryWrapper<PatrolControlVehicle>()
+                    .eq(PatrolControlVehicle::getStatus, "ENABLED")
+                    .and(wrapper -> wrapper.isNull(PatrolControlVehicle::getExpiresAt).or().gt(PatrolControlVehicle::getExpiresAt, now)))
+                .stream()
+                .filter(vehicle -> plateNo.equals(normalizePlate(vehicle.getPlateNo())))
+                .findFirst()
+                .orElseThrow(() -> new ServiceException("车牌未命中有效车辆布控：" + plateNo));
+
+            String requestedControlId = blankToDefault(request.getControlId(), controlled.getControlId());
+            if (!controlled.getControlId().equals(requestedControlId)) {
+                throw new ServiceException("车辆布控编号与车牌不匹配");
+            }
+            String alertId = blankToDefault(requestedAlertId, "PLATE-" + deviceId + "-" + controlled.getControlId() + "-" + UUID.randomUUID());
+            String riskLevel = blankToDefault(controlled.getRiskLevel(), blankToDefault(request.getRiskLevel(), "MEDIUM"));
+            String level = "HIGH".equalsIgnoreCase(riskLevel) ? "HIGH" : "WARNING";
+            Double confidenceValue = request.getConfidence();
+            String confidence = confidenceValue == null ? "-" : Math.round(confidenceValue * 100) + "%";
+            String backend = blankToDefault(request.getBackend(), "cloud-vision");
+
+            PatrolAlert alert = getOrCreateAlert(alertId);
+            alert.setTitle("布控车辆疑似命中：" + plateNo);
+            alert.setLevel(level);
+            alert.setStatus("PENDING");
+            alert.setOccurredAt(blankToDefault(request.getOccurredAt(), Date.from(Instant.now()).toString()));
+            alert.setLocationText(blankToDefault(request.getCameraId(), "云端识别任务"));
+            alert.setSource(deviceId);
+            alert.setConfidence(confidence);
+            alert.setDescription("云端车牌识别命中有效车辆布控，车牌=" + plateNo
+                + "，布控编号=" + controlled.getControlId()
+                + "，车辆=" + blankToDefault(controlled.getVehicleDesc(), "-")
+                + "，类型=" + blankToDefault(controlled.getVehicleType(), "-")
+                + "，风险=" + riskLevel
+                + "，识别后端=" + backend
+                + "，流=" + blankToDefault(request.getStreamId(), "-")
+                + "，帧=" + blankToDefault(request.getFrameId(), "-")
+                + "。结果已回传移动端，仍需现场人工确认。");
+            alert.setDelFlag("0");
+            alertMapper.insertOrUpdate(alert);
+
+            saveDeviceEvent(deviceId, "PLATE_ALERT", level, "布控车辆疑似命中", alert.getDescription());
+            saveAlertDisposition(alertId, "CREATE", "PENDING", "云端车牌识别命中，等待移动端人工确认", 0);
+            saveAudit("ALERT", "云端上报布控车辆疑似命中", alertId, "SUCCESS");
+            realtimePublisher.publish("ALERT_CREATED", "alerts", alert.getTitle(), alert.getDescription(), alertId,
+                realtimePublisher.payload("alertId", alertId, "deviceId", deviceId, "controlId", controlled.getControlId(), "plateNo", plateNo, "status", alert.getStatus(), "level", level));
             return toAlertDto(alert);
         });
     }
@@ -1511,12 +1735,71 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         }
     }
 
+    private String vehicleLibraryVersion(List<PatrolControlVehicle> vehicles) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (PatrolControlVehicle vehicle : vehicles) {
+                Date updatedAt = vehicle.getUpdateTime() != null ? vehicle.getUpdateTime() : vehicle.getCreateTime();
+                String payload = blankToDefault(vehicle.getControlId(), "")
+                    + "|" + normalizePlate(vehicle.getPlateNo())
+                    + "|" + blankToDefault(vehicle.getStatus(), "")
+                    + "|" + blankToDefault(vehicle.getRiskLevel(), "")
+                    + "|" + (updatedAt == null ? 0L : updatedAt.getTime());
+                digest.update(payload.getBytes(StandardCharsets.UTF_8));
+            }
+            return "vehicle-lib-" + hex(digest.digest()).substring(0, 16);
+        } catch (NoSuchAlgorithmException e) {
+            throw new ServiceException("生成车辆布控库版本失败：" + e.getMessage());
+        }
+    }
+
+    private String normalizePlate(String value) {
+        return blankToDefault(value, "")
+            .trim()
+            .toUpperCase()
+            .replaceAll("[\\s·•・.\\-]", "");
+    }
+
     private PatrolDevice getOrCreateDevice(String deviceId) {
         PatrolDevice device = deviceMapper.selectById(deviceId);
         if (device != null) {
             return device;
         }
-        throw new ServiceException("设备未注册：" + deviceId);
+        if (deviceId == null || deviceId.isBlank()) {
+            throw new ServiceException("设备ID不能为空");
+        }
+        device = new PatrolDevice();
+        device.setDeviceId(deviceId);
+        device.setTenantId(TENANT_ID);
+        device.setDeviceName(deviceId.startsWith("sourcenex:") ? "SourceNex 智能眼镜" : "执法耳机 " + deviceId);
+        device.setDeviceType(deviceId.startsWith("sourcenex:") ? "GLASSES" : "HEADSET");
+        device.setMacAddress(deviceId.contains(":") ? deviceId.substring(deviceId.indexOf(':') + 1) : deviceId);
+        device.setBonded(true);
+        device.setOnline(false);
+        device.setBatteryPercent(0);
+        device.setSignalBars(0);
+        device.setOnlineDuration("00:00:00");
+        device.setStorageUsedGb(0F);
+        device.setStorageTotalGb(0F);
+        device.setFirmwareVersion("");
+        device.setRecordingStatus("IDLE");
+        device.setTalking(false);
+        device.setCloudConnected(false);
+        device.setDelFlag("0");
+        deviceMapper.insert(device);
+        return device;
+    }
+
+    private void applyAcknowledgedDeviceCommand(PatrolDevice device, String command) {
+        if ("START_RECORD".equals(command)) {
+            device.setRecordingStatus("RECORDING");
+        } else if ("STOP_RECORD".equals(command)) {
+            device.setRecordingStatus("IDLE");
+        } else if ("START_TALK".equals(command)) {
+            device.setTalking(true);
+        } else if ("STOP_TALK".equals(command)) {
+            device.setTalking(false);
+        }
     }
 
     private PatrolDeviceConfig getOrCreateDeviceConfig(String deviceId) {
@@ -1575,8 +1858,9 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         config.setSupportsFileTransfer(headset || glasses || recorder);
         config.setSupportsPhoto(headset || glasses || recorder);
         config.setSupportsVideo(headset || glasses || recorder);
-        config.setSupportsAudioRecord(headset || recorder);
-        config.setSupportsRealtimeAudio(headset);
+        config.setSupportsAudioRecord(headset || glasses || recorder);
+        // 当前接入的 UTE 与 SourceNex SDK 只提供文件型录音，不提供实时双向音频协议。
+        config.setSupportsRealtimeAudio(false);
     }
 
     private PatrolAlert getOrCreateAlert(String alertId) {
@@ -1597,6 +1881,23 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         alert.setConfidence("0%");
         alert.setDelFlag("0");
         return alert;
+    }
+
+    /**
+     * 云端发件箱可能在平台已落库但响应丢失时重放，同一来源和告警编号必须幂等返回。
+     */
+    private AlertDto replayedCerebellumAlert(String alertId, String deviceId) {
+        if (alertId == null || alertId.isBlank()) {
+            return null;
+        }
+        PatrolAlert existing = alertMapper.selectById(alertId);
+        if (existing == null) {
+            return null;
+        }
+        if (!blankToDefault(existing.getSource(), "").equals(blankToDefault(deviceId, ""))) {
+            throw new ServiceException("告警编号已被其他来源占用：" + alertId);
+        }
+        return toAlertDto(existing);
     }
 
     private AlertDto updateAlert(String alertId, String status, String description, String result, String operatorId) {
@@ -1766,7 +2067,9 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         current.setDeptName(blankToDefault(current.getDeptName(), blankToDefault(loginUser.getDeptName(), "未分配")));
         current.setBadgeNo(loginUser.getUsername());
         current.setBindStatus("BOUND");
-        current.setBoundAt(new Date());
+        if (current.getBoundAt() == null) {
+            current.setBoundAt(new Date());
+        }
         current.setRemark("App端绑定");
         current.setDelFlag("0");
         deviceBindingMapper.insertOrUpdate(current);
@@ -1856,36 +2159,55 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         auditLogMapper.insert(log);
     }
 
-    private boolean isMessageVisible(PatrolMessage message, String targetId) {
-        if ("ORG".equals(message.getTargetType())) {
-            return true;
-        }
-        if ("DEVICE".equals(message.getTargetType())) {
-            return currentBoundDeviceId().equals(message.getTargetId());
-        }
-        return targetId.equals(message.getTargetId());
+    private boolean isLegacyMessageVisible(PatrolMessage message, Set<String> recipientKeys) {
+        return message.getTargetId() != null && recipientKeys.contains(message.getTargetId());
     }
 
-    private PatrolMessageReceipt visibleReceipt(String messageId, String targetId) {
-        List<String> keys = new ArrayList<>();
-        String safeTargetId = blankToDefault(targetId, "");
-        String username = blankToDefault(LoginHelper.getUsername(), "");
-        String deviceId = currentBoundDeviceId();
-        if (!safeTargetId.isBlank()) {
-            keys.add(safeTargetId);
-        }
-        if (!username.isBlank() && !keys.contains(username)) {
-            keys.add(username);
-        }
-        if (!deviceId.isBlank() && !keys.contains(deviceId)) {
-            keys.add(deviceId);
-        }
+    private PatrolMessageReceipt visibleReceipt(String messageId, Set<String> recipientKeys) {
         return messageReceiptMapper.selectList(new LambdaQueryWrapper<PatrolMessageReceipt>()
                 .eq(PatrolMessageReceipt::getMessageId, messageId))
             .stream()
-            .filter(item -> keys.contains(item.getRecipientId()) || keys.contains(item.getDeviceId()))
+            .filter(item -> recipientKeys.contains(item.getRecipientId()) || recipientKeys.contains(item.getDeviceId()))
             .findFirst()
             .orElse(null);
+    }
+
+    private boolean hasMessageReceipts(String messageId) {
+        return messageReceiptMapper.selectCount(new LambdaQueryWrapper<PatrolMessageReceipt>()
+            .eq(PatrolMessageReceipt::getMessageId, messageId)) > 0;
+    }
+
+    /**
+     * 消息可见范围只能由当前登录身份和真实设备绑定推导，不能接受客户端传入任意警号扩大权限。
+     */
+    private Set<String> currentMessageRecipientKeys() {
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        Set<String> keys = new LinkedHashSet<>();
+        addMessageRecipientKey(keys, loginUser.getUsername());
+        addMessageRecipientKey(keys, loginUser.getUserId());
+        addMessageRecipientKey(keys, LoginHelper.getDeptId());
+        deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
+                .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                .and(wrapper -> wrapper.eq(PatrolDeviceBinding::getUserId, loginUser.getUserId())
+                    .or().eq(PatrolDeviceBinding::getUserName, loginUser.getUsername())))
+            .forEach(binding -> {
+                addMessageRecipientKey(keys, binding.getUserName());
+                addMessageRecipientKey(keys, binding.getBadgeNo());
+                addMessageRecipientKey(keys, binding.getDeviceId());
+                addMessageRecipientKey(keys, binding.getDeptId());
+                addMessageRecipientKey(keys, binding.getDeptName());
+            });
+        return keys;
+    }
+
+    private void addMessageRecipientKey(Set<String> keys, Object value) {
+        if (value == null) {
+            return;
+        }
+        String normalized = value.toString().trim();
+        if (!normalized.isBlank()) {
+            keys.add(normalized);
+        }
     }
 
     private void markReceiptDelivered(PatrolMessageReceipt receipt) {
@@ -1938,6 +2260,54 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             .orElse(null);
     }
 
+    private PatrolDeviceBinding requireCurrentUserDeviceBinding(String deviceId) {
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        return deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
+                .eq(PatrolDeviceBinding::getDeviceId, deviceId)
+                .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                .and(wrapper -> wrapper.eq(PatrolDeviceBinding::getUserId, loginUser.getUserId())
+                    .or().eq(PatrolDeviceBinding::getUserName, loginUser.getUsername()))
+                .orderByDesc(PatrolDeviceBinding::getBoundAt))
+            .stream()
+            .findFirst()
+            .orElseThrow(() -> new ServiceException("当前账号未绑定设备：" + deviceId));
+    }
+
+    private Set<String> currentBoundDeviceIds() {
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        return deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
+                .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                .and(wrapper -> wrapper.eq(PatrolDeviceBinding::getUserId, loginUser.getUserId())
+                    .or().eq(PatrolDeviceBinding::getUserName, loginUser.getUsername())))
+            .stream()
+            .map(PatrolDeviceBinding::getDeviceId)
+            .filter(deviceId -> deviceId != null && !deviceId.isBlank())
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * 设备来源告警只回传给当前绑定人；非设备来源（固定摄像机、云节点或系统告警）保持全局可见。
+     */
+    private boolean isAlertVisibleToCurrentUser(PatrolAlert alert, Set<String> boundDeviceIds) {
+        String source = blankToDefault(alert.getSource(), "").trim();
+        if (source.isBlank()) {
+            return true;
+        }
+        PatrolDevice sourceDevice = deviceMapper.selectById(source);
+        return sourceDevice == null || boundDeviceIds.contains(source);
+    }
+
+    private PatrolAlert requireVisibleAlert(String alertId) {
+        PatrolAlert alert = alertMapper.selectById(alertId);
+        if (alert == null) {
+            throw new ServiceException("预警不存在：" + alertId);
+        }
+        if (!isAlertVisibleToCurrentUser(alert, currentBoundDeviceIds())) {
+            throw new ServiceException("无权处置该设备告警");
+        }
+        return alert;
+    }
+
     private String currentBoundDeviceId() {
         String username = LoginHelper.getUsername();
         return deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
@@ -1963,7 +2333,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             Boolean.TRUE.equals(config.getSupportsPhoto()),
             Boolean.TRUE.equals(config.getSupportsVideo()),
             Boolean.TRUE.equals(config.getSupportsAudioRecord()),
-            Boolean.TRUE.equals(config.getSupportsRealtimeAudio())
+            false
         );
     }
 
@@ -2025,8 +2395,19 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     private SosEventDto toSosDto(PatrolSosEvent event) {
-        GpsLocationDto location = event.getLatitude() == null ? null : new GpsLocationDto(event.getLatitude(), event.getLongitude(), value(event.getAccuracyMeters(), 0F), event.getAddress());
+        GpsLocationDto location = event.getLatitude() == null ? null : new GpsLocationDto(event.getLatitude(), event.getLongitude(), value(event.getAccuracyMeters(), 0F), event.getAddress(), event.getDeviceId(), event.getSosId());
         return new SosEventDto(event.getSosId(), event.getPhase(), event.getMessage(), location, Boolean.TRUE.equals(event.getRecordingAudio()), event.getBackupEtaMinutes());
+    }
+
+    private String normalizedClientSosId(String value) {
+        String normalized = blankToDefault(value, "").trim();
+        if (normalized.isBlank()) {
+            return "";
+        }
+        if (normalized.length() > 64 || !normalized.matches("SOS-APP-[A-Za-z0-9-]{8,56}")) {
+            throw new ServiceException("无效的客户端SOS事件编号");
+        }
+        return normalized;
     }
 
     private PatrolMessageDto toMessageDto(PatrolMessage message, PatrolMessageReceipt receipt) {

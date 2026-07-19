@@ -4,10 +4,12 @@ import org.dromara.patrol.entity.AlertCloseRequestDto;
 import org.dromara.patrol.entity.AlertDto;
 import org.dromara.patrol.entity.AuthSessionDto;
 import org.dromara.patrol.entity.CerebellumFaceAlertRequestDto;
+import org.dromara.patrol.entity.CerebellumPlateAlertRequestDto;
 import org.dromara.patrol.entity.CerebellumSettingsDto;
 import org.dromara.patrol.entity.DeviceAdvancedSettingsDto;
 import org.dromara.patrol.entity.DeviceCapabilitiesDto;
 import org.dromara.patrol.entity.DeviceCommandRequestDto;
+import org.dromara.patrol.entity.DeviceCommandAckRequestDto;
 import org.dromara.patrol.entity.DeviceControlResultDto;
 import org.dromara.patrol.entity.DeviceStatusDto;
 import org.dromara.patrol.entity.DeviceWifiStateDto;
@@ -32,6 +34,7 @@ import org.dromara.patrol.entity.MediaUploadTaskDto;
 import org.dromara.patrol.entity.PageEnvelope;
 import org.dromara.patrol.entity.PatrolAreaDto;
 import org.dromara.patrol.entity.PatrolMessageDto;
+import org.dromara.patrol.entity.PendingDeviceCommandDto;
 import org.dromara.patrol.entity.ScannedDeviceDto;
 import org.dromara.patrol.entity.SosEventDto;
 import org.dromara.patrol.entity.StreamRelayRequestDto;
@@ -39,6 +42,7 @@ import org.dromara.patrol.entity.StreamRelayStateDto;
 import org.dromara.patrol.entity.TransferRequestDto;
 import org.dromara.patrol.entity.UserProfileDto;
 import org.dromara.patrol.entity.VersionCheckDto;
+import org.dromara.patrol.entity.VehicleLibraryPackageDto;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
@@ -66,6 +70,10 @@ public interface IPatrolAppService {
     DeviceStatusDto unbindDevice(String deviceId);
 
     DeviceStatusDto sendDeviceCommand(String deviceId, DeviceCommandRequestDto request);
+
+    List<PendingDeviceCommandDto> pendingDeviceCommands(String deviceId, int limit);
+
+    DeviceControlResultDto acknowledgeDeviceCommand(String commandId, DeviceCommandAckRequestDto request);
 
     DeviceCapabilitiesDto deviceCapabilities(String deviceId);
 
@@ -158,4 +166,8 @@ public interface IPatrolAppService {
     DeviceControlResultDto acknowledgeFaceLibrary(FaceLibraryAckRequestDto request);
 
     AlertDto reportCerebellumFaceAlert(CerebellumFaceAlertRequestDto request);
+
+    VehicleLibraryPackageDto vehicleLibraryPackage(String deviceId, String currentVersion, boolean force);
+
+    AlertDto reportCerebellumPlateAlert(CerebellumPlateAlertRequestDto request);
 }

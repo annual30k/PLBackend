@@ -36,7 +36,6 @@ import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
@@ -51,10 +50,6 @@ public class PatrolFileController {
 
     private static final long RESPONSE_TIME = 1715832000L;
     private static final String SAMPLE_PREFIX = "classpath:patrol-samples/";
-    private static final byte[] PLACEHOLDER_JPEG = Base64.getDecoder().decode(
-        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAVEAEBAAAAAAAAAAAAAAAAAAAAAf/aAAwDAQACEAMQAAABqA//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Al//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z"
-    );
-
     private final PatrolMediaMapper mediaMapper;
     private final ISysOssService ossService;
     private final CerebellumAccessGuard cerebellumAccessGuard;
@@ -116,6 +111,10 @@ public class PatrolFileController {
             return;
         }
         PatrolMedia media = findMedia(fileId, currentUserIdOrNull());
+        if (media == null) {
+            response.sendError(HttpServletResponse.SC_NOT_FOUND, "媒体证据不存在");
+            return;
+        }
         if (shouldServeClasspathSample(media)) {
             writeClasspathSample(media, response);
             return;
@@ -124,12 +123,7 @@ public class PatrolFileController {
             ossService.download(media.getOssId(), response);
             return;
         }
-        byte[] placeholder = ("PatrolLink evidence placeholder for " + fileId + "\n").getBytes(StandardCharsets.UTF_8);
-        response.setStatus(HttpServletResponse.SC_OK);
-        response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
-        response.setHeader("Content-Disposition", "attachment; filename=\"" + fileId + ".bin\"");
-        response.setContentLength(placeholder.length);
-        response.getOutputStream().write(placeholder);
+        response.sendError(HttpServletResponse.SC_GONE, "媒体证据对象已丢失或尚未完成入库");
     }
 
     static boolean shouldServeClasspathSample(PatrolMedia media) {
@@ -142,7 +136,7 @@ public class PatrolFileController {
         String resourcePath = media.getObjectKey().substring(SAMPLE_PREFIX.length());
         ClassPathResource resource = new ClassPathResource("patrol-samples/" + resourcePath);
         if (!resource.exists()) {
-            writeMissingSamplePlaceholder(media, response);
+            response.sendError(HttpServletResponse.SC_GONE, "媒体样本文件已丢失");
             return;
         }
         response.setStatus(HttpServletResponse.SC_OK);
@@ -154,23 +148,6 @@ public class PatrolFileController {
         try (InputStream input = resource.getInputStream(); OutputStream output = response.getOutputStream()) {
             input.transferTo(output);
         }
-    }
-
-    private void writeMissingSamplePlaceholder(PatrolMedia media, HttpServletResponse response) throws IOException {
-        if ("PHOTO".equalsIgnoreCase(media.getMediaType()) || StringUtils.blankToDefault(media.getMimeType(), "").startsWith("image/")) {
-            response.setStatus(HttpServletResponse.SC_OK);
-            response.setContentType(MediaType.IMAGE_JPEG_VALUE);
-            response.setHeader("Content-Disposition", "attachment; filename=\"" + media.getFileName() + "\"");
-            response.setContentLength(PLACEHOLDER_JPEG.length);
-            response.getOutputStream().write(PLACEHOLDER_JPEG);
-            return;
-        }
-        byte[] placeholder = ("PatrolLink sample media is missing: " + media.getFileName() + "\n").getBytes(StandardCharsets.UTF_8);
-        response.setStatus(HttpServletResponse.SC_OK);
-        response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
-        response.setHeader("Content-Disposition", "attachment; filename=\"" + media.getFileName() + "\"");
-        response.setContentLength(placeholder.length);
-        response.getOutputStream().write(placeholder);
     }
 
     @DeleteMapping("/{fileId}")
@@ -202,9 +179,6 @@ public class PatrolFileController {
                 .eq(userId != null, PatrolMedia::getCreateBy, userId)
                 .orderByDesc(PatrolMedia::getCreateTime)
                 .last("limit 1"));
-        }
-        if (media == null) {
-            throw new ServiceException("媒体文件不存在");
         }
         return media;
     }

@@ -138,6 +138,7 @@ public class PatrolController {
 
     private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+    private static final long DEVICE_HEARTBEAT_TIMEOUT_MILLIS = 45_000L;
 
     private final PatrolDeviceMapper deviceMapper;
     private final PatrolDeviceCommandMapper commandMapper;
@@ -176,7 +177,7 @@ public class PatrolController {
         List<PatrolAlert> alerts = alertMapper.selectList();
         List<PatrolMedia> media = mediaMapper.selectList();
         List<PatrolSosEvent> sosEvents = sosEventMapper.selectList();
-        long onlineDevices = devices.stream().filter(item -> Boolean.TRUE.equals(item.getOnline())).count();
+        long onlineDevices = devices.stream().filter(this::isDeviceOnline).count();
         long pendingAlerts = alerts.stream().filter(item -> !"CLOSED".equals(item.getStatus())).count();
         long activeSos = sosEvents.stream().filter(item -> "ACTIVE".equals(item.getPhase())).count();
         return R.ok(new DashboardSummaryVo(
@@ -232,14 +233,14 @@ public class PatrolController {
     @PostMapping("/devices/{deviceId}/realtime-audio/start")
     public R<DeviceControlResultDto> startDeviceRealtimeAudio(@PathVariable String deviceId) {
         DeviceControlResultDto result = patrolAppService.startRealtimeAudioSync(deviceId);
-        logAudit("DEVICE", "后台开启实时音频同步", deviceId, result.isSuccess() ? "SUCCESS" : "FAILED");
+        logAudit("DEVICE", "请求开启硬件实时音频", deviceId, result.isSuccess() ? "SUCCESS" : "UNSUPPORTED");
         return R.ok(result);
     }
 
     @PostMapping("/devices/{deviceId}/realtime-audio/stop")
     public R<DeviceControlResultDto> stopDeviceRealtimeAudio(@PathVariable String deviceId) {
         DeviceControlResultDto result = patrolAppService.stopRealtimeAudioSync(deviceId);
-        logAudit("DEVICE", "后台停止实时音频同步", deviceId, result.isSuccess() ? "SUCCESS" : "FAILED");
+        logAudit("DEVICE", "请求停止硬件实时音频", deviceId, result.isSuccess() ? "SUCCESS" : "UNSUPPORTED");
         return R.ok(result);
     }
 
@@ -254,11 +255,6 @@ public class PatrolController {
     public R<CommandResultVo> command(@PathVariable String deviceId, @RequestBody DeviceCommandBo command) {
         String commandId = "CMD-" + UUID.randomUUID();
         Date now = new Date();
-        PatrolDevice device = deviceMapper.selectById(deviceId);
-        if (device != null) {
-            applyDeviceCommand(device, command.command());
-            deviceMapper.updateById(device);
-        }
         PatrolDeviceCommand record = new PatrolDeviceCommand();
         record.setCommandId(commandId);
         record.setTenantId(currentTenantId());
@@ -266,16 +262,16 @@ public class PatrolController {
         record.setCommand(command.command());
         record.setOperatorId(blankToDefault(command.operatorId(), currentOperator()));
         record.setRequestId(command.requestId());
-        record.setStatus("ACCEPTED");
-        record.setResultMessage("指令已写入设备状态，等待端侧回执");
+        record.setStatus("QUEUED");
+        record.setResultMessage("指令已进入下行队列，等待 Android 拉取和设备真实回执");
         record.setSentAt(now);
         record.setDelFlag("0");
         commandMapper.insert(record);
         saveDeviceEvent(deviceId, "COMMAND", "INFO", "平台下发设备指令", command.command());
         logAudit("COMMAND", "下发设备指令：" + command.command(), deviceId, "SUCCESS");
         realtimePublisher.publish("DEVICE_COMMAND", "devices", "平台下发设备指令", deviceId + " " + command.command(), deviceId,
-            realtimePublisher.payload("commandId", commandId, "deviceId", deviceId, "command", command.command(), "status", "ACCEPTED"));
-        return R.ok(new CommandResultVo(commandId, deviceId, command.command(), "ACCEPTED", record.getResultMessage()));
+            realtimePublisher.payload("commandId", commandId, "deviceId", deviceId, "command", command.command(), "status", "QUEUED"));
+        return R.ok(new CommandResultVo(commandId, deviceId, command.command(), "QUEUED", record.getResultMessage()));
     }
 
     @GetMapping("/devices/commands")
@@ -319,55 +315,9 @@ public class PatrolController {
     @GetMapping("/dispatch/channels")
     public R<List<DispatchChannelVo>> dispatchChannels() {
         return R.ok(deviceMapper.selectList(new LambdaQueryWrapper<PatrolDevice>().eq(PatrolDevice::getOnline, true)).stream()
+            .filter(this::isDeviceOnline)
             .map(item -> new DispatchChannelVo("CH-" + item.getDeviceId(), item.getDeviceId(), officerName(item), deptName(item), Boolean.TRUE.equals(item.getTalking()) ? "INTERCOM" : "READY", "WebRTC/VoIP", 0, blankToDefault(item.getAddress(), "未知位置"), Boolean.TRUE.equals(item.getTalking())))
             .toList());
-    }
-
-    @PostMapping("/dispatch/sessions")
-    public R<DispatchSessionVo> createDispatchSession(@RequestBody DispatchSessionBo bo) {
-        return R.ok(new DispatchSessionVo(
-            "dispatch-" + System.currentTimeMillis(),
-            bo.deviceId(),
-            bo.mode(),
-            null,
-            "RESERVED"
-        ));
-    }
-
-    @DeleteMapping("/dispatch/sessions/{sessionId}")
-    public R<DispatchActionVo> closeDispatchSession(@PathVariable String sessionId) {
-        return R.ok(new DispatchActionVo(sessionId, "CLOSED", "调度会话已关闭，设备推流状态等待 App 回执"));
-    }
-
-    @PostMapping("/dispatch/sessions/{sessionId}/snapshot")
-    public R<MediaVo> snapshot(@PathVariable String sessionId) {
-        return R.ok(new MediaVo(
-            "MF-SNAPSHOT-" + System.currentTimeMillis(),
-            sessionId + "_snapshot.jpg",
-            "PHOTO",
-            "",
-            "-",
-            sessionId,
-            "1.6 MB",
-            "PENDING",
-            "MinIO/patrol-evidence",
-            "2026-05-14 09:20:18",
-            null,
-            null,
-            null,
-            null,
-            "/files/MF-SNAPSHOT/download"
-        ));
-    }
-
-    @PostMapping("/dispatch/sessions/{sessionId}/talk/start")
-    public R<TalkSessionVo> startTalk(@PathVariable String sessionId) {
-        return R.ok(new TalkSessionVo("talk-" + System.currentTimeMillis(), sessionId, "MIGRATED", "/patrol/dispatch/intercom/sessions"));
-    }
-
-    @PostMapping("/dispatch/sessions/{sessionId}/talk/stop")
-    public R<TalkSessionVo> stopTalk(@PathVariable String sessionId) {
-        return R.ok(new TalkSessionVo("talk-" + System.currentTimeMillis(), sessionId, "CLOSED", ""));
     }
 
     @PostMapping("/dispatch/intercom/sessions")
@@ -402,7 +352,7 @@ public class PatrolController {
                 BigDecimal.valueOf(item.getLatitude()),
                 BigDecimal.valueOf(item.getLongitude()),
                 blankToDefault(item.getAddress(), "未知位置"),
-                Boolean.TRUE.equals(item.getOnline()) ? "ONLINE" : "OFFLINE",
+                isDeviceOnline(item) ? "ONLINE" : "OFFLINE",
                 value(item.getBatteryPercent()),
                 formatDate(item.getLastHeartbeatTime())
             ))
@@ -833,6 +783,27 @@ public class PatrolController {
             .stream()
             .map(this::toSosTimelineVo)
             .forEach(timeline::add);
+        mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>()
+                .eq(PatrolMedia::getBizType, "SOS_AUDIO")
+                .eq(PatrolMedia::getBizId, sosId)
+                .orderByAsc(PatrolMedia::getCreateTime))
+            .stream()
+            .map(media -> new SosTimelineVo(
+                "SOS-MEDIA-" + media.getFileId(),
+                sosId,
+                "SOS_AUDIO_UPLOADED",
+                "ATTACHED",
+                blankToDefault(media.getOfficerName(), "App端"),
+                "移动端现场录音已上传并完成哈希校验",
+                null,
+                null,
+                media.getFileId(),
+                media.getFileName(),
+                null,
+                formatDate(media.getCreateTime())
+            ))
+            .forEach(timeline::add);
+        timeline.sort((left, right) -> left.occurredAt().compareTo(right.occurredAt()));
         return R.ok(timeline);
     }
 
@@ -852,26 +823,19 @@ public class PatrolController {
         return R.ok(new SosActionVo(sosId, event.getPhase(), "增援信息已记录"));
     }
 
-    @PostMapping("/sos/{sosId}/recordings")
-    public R<SosActionVo> addSosRecording(@PathVariable String sosId, @RequestBody SosRecordingBo bo) {
-        if (sosEventMapper.selectById(sosId) == null) {
-            return R.ok(new SosActionVo(sosId, "FAILED", "SOS事件不存在"));
-        }
-        saveSosDisposition(sosId, "ADD_RECORDING", "ATTACHED", blankToDefault(bo.note(), "已关联SOS录音附件"), null, null, bo.fileId(), bo.fileName(), null);
-        logAudit("SOS", "关联SOS录音附件", sosId, "SUCCESS");
-        return R.ok(new SosActionVo(sosId, "ATTACHED", "SOS录音附件已记录"));
-    }
-
     @PostMapping("/sos/{sosId}/notify")
     public R<SosActionVo> notifySosContact(@PathVariable String sosId, @RequestBody SosContactBo bo) {
         if (sosEventMapper.selectById(sosId) == null) {
             return R.ok(new SosActionVo(sosId, "FAILED", "SOS事件不存在"));
         }
-        saveSosDisposition(sosId, "NOTIFY_CONTACT", "NOTIFIED", blankToDefault(bo.note(), "已通知联系人"), bo.contactName(), bo.contactPhone(), null, null, null);
-        logAudit("SOS", "通知SOS联系人", sosId, "SUCCESS");
-        realtimePublisher.publish("SOS_CONTACT_NOTIFIED", "sos", "SOS联系人已通知", blankToDefault(bo.contactName(), sosId), sosId,
+        if (bo.contactName() == null || bo.contactName().isBlank() || bo.contactPhone() == null || bo.contactPhone().isBlank()) {
+            return R.ok(new SosActionVo(sosId, "FAILED", "请填写实际联系人和联系电话"));
+        }
+        saveSosDisposition(sosId, "MANUAL_CONTACT_CONFIRMED", "RECORDED", blankToDefault(bo.note(), "指挥员已人工确认通知"), bo.contactName(), bo.contactPhone(), null, null, null);
+        logAudit("SOS", "记录人工联系人通知结果", sosId, "SUCCESS");
+        realtimePublisher.publish("SOS_CONTACT_RECORDED", "sos", "SOS人工通知结果已记录", bo.contactName(), sosId,
             realtimePublisher.payload("sosId", sosId, "contactName", bo.contactName(), "contactPhone", bo.contactPhone()));
-        return R.ok(new SosActionVo(sosId, "NOTIFIED", "联系人通知已记录"));
+        return R.ok(new SosActionVo(sosId, "RECORDED", "人工通知结果已记录"));
     }
 
     @PostMapping("/sos/{sosId}/notes")
@@ -902,21 +866,35 @@ public class PatrolController {
 
     @PostMapping("/messages/send")
     public R<MessageResultVo> sendMessage(@RequestBody MessageBo bo) {
+        if (bo == null || bo.targetId() == null || bo.targetId().isBlank()) {
+            throw new ServiceException("消息接收目标不能为空");
+        }
+        if (bo.content() == null || bo.content().isBlank()) {
+            throw new ServiceException("消息内容不能为空");
+        }
+        String targetId = bo.targetId().trim();
+        String targetType = blankToDefault(bo.targetType(), "SINGLE").trim().toUpperCase();
+        if (!Set.of("SINGLE", "DEVICE", "ORG").contains(targetType)) {
+            throw new ServiceException("不支持的消息目标类型：" + targetType);
+        }
         Date now = new Date();
         String messageId = "MSG-" + UUID.randomUUID();
-        List<MessageRecipient> recipients = resolveMessageRecipients(bo.targetId(), bo.targetType());
+        List<MessageRecipient> recipients = resolveMessageRecipients(targetId, targetType);
+        if (recipients.isEmpty()) {
+            throw new ServiceException("未找到可接收消息的警员或已绑定设备");
+        }
         PatrolMessage message = new PatrolMessage();
         message.setMessageId(messageId);
         message.setTenantId(currentTenantId());
         message.setTitle(blankToDefault(bo.title(), "指挥消息"));
-        message.setContent(bo.content());
-        message.setTargetType(bo.targetType());
-        message.setTargetId(bo.targetId());
-        message.setTargetName(targetName(bo.targetId(), bo.targetType()));
+        message.setContent(bo.content().trim());
+        message.setTargetType(targetType);
+        message.setTargetId(targetId);
+        message.setTargetName(targetName(targetId, targetType));
         message.setChannel("APP");
         message.setStatus("SENT");
         message.setReadCount(0);
-        message.setTotalCount(Math.max(recipients.size(), 1));
+        message.setTotalCount(recipients.size());
         message.setSentAt(now);
         message.setDelFlag("0");
         messageMapper.insert(message);
@@ -924,7 +902,7 @@ public class PatrolController {
         logAudit("MESSAGE", "发送指挥消息", messageId, "SUCCESS");
         realtimePublisher.publish("MESSAGE_SENT", "messages", "指挥消息已发送", message.getTitle(), messageId,
             realtimePublisher.payload("messageId", messageId, "targetType", message.getTargetType(), "targetId", message.getTargetId(), "title", message.getTitle(), "totalCount", message.getTotalCount()));
-        return R.ok(new MessageResultVo(messageId, bo.targetId(), "SENT", formatDate(now)));
+        return R.ok(new MessageResultVo(messageId, targetId, "SENT", formatDate(now)));
     }
 
     @GetMapping("/messages")
@@ -1110,7 +1088,7 @@ public class PatrolController {
         List<PatrolAlert> alerts = alertMapper.selectList();
         List<PatrolMedia> media = mediaMapper.selectList();
         List<PatrolSosEvent> sosEvents = sosEventMapper.selectList();
-        long onlineDevices = devices.stream().filter(item -> Boolean.TRUE.equals(item.getOnline())).count();
+        long onlineDevices = devices.stream().filter(this::isDeviceOnline).count();
         long totalDevices = devices.size();
         long closedAlerts = alerts.stream().filter(item -> "CLOSED".equals(item.getStatus())).count();
         long pendingAlerts = alerts.size() - closedAlerts;
@@ -1162,8 +1140,8 @@ public class PatrolController {
     @GetMapping("/integration/configs")
     public R<List<IntegrationConfigVo>> integrationConfigs() {
         return R.ok(List.of(
-            new IntegrationConfigVo("FACE_MATCH", "第三方人脸比对", "RESERVED", "HTTP API / MQ", "接收比中结果并转预警"),
-            new IntegrationConfigVo("PLATE_OCR", "第三方车牌 OCR", "RESERVED", "HTTP API / MQ", "接收车牌结构化结果"),
+            new IntegrationConfigVo("FACE_MATCH", "云端人脸布控", "IMPLEMENTED", "PLCerebellum HTTP API", "同步平台人员库；真实模型比中后回传移动端，fallback 不生成正式告警"),
+            new IntegrationConfigVo("PLATE_OCR", "云端车牌布控", "IMPLEMENTED", "PLCerebellum HTTP API", "同步平台车辆库；真实识别命中后由平台复核并回传移动端"),
             new IntegrationConfigVo("POLICE_110", "110 接处警平台", "RESERVED", "专网接口", "报警位置上图二期接入"),
             new IntegrationConfigVo("MAP_AMAP", "高德地图", "PLANNED", "JS SDK / Web API", "警力一张图底图与坐标服务")
         ));
@@ -1177,7 +1155,7 @@ public class PatrolController {
             "cache", "Redis/Redisson",
             "map", "高德地图",
             "videoLayouts", List.of(2, 4, 8, 12, 16),
-            "algorithm", "第三方人脸比对与车牌 OCR",
+            "algorithm", "PLCerebellum 云端人脸/车牌识别（真实模型结果）",
             "policeCallIntegration", "预留 110 接处警平台接口"
         ));
     }
@@ -1281,6 +1259,7 @@ public class PatrolController {
             .limit(2)
             .forEach(item -> items.add(new WorkItemVo(item.getSosId(), "一键 SOS 求助", "移动端警员", blankToDefault(item.getAddress(), "未知位置"), item.getPhase(), "CRITICAL", formatDate(item.getCreateTime()))));
         devices.stream()
+            .filter(this::isDeviceOnline)
             .filter(item -> value(item.getBatteryPercent()) > 0 && value(item.getBatteryPercent()) < 20)
             .limit(2)
             .forEach(item -> items.add(new WorkItemVo("device-" + item.getDeviceId(), "设备低电量", officerName(item), item.getDeviceId() + " 电量 " + item.getBatteryPercent() + "%", "待确认", "WARNING", formatDate(item.getLastHeartbeatTime()))));
@@ -1294,7 +1273,7 @@ public class PatrolController {
             officerName(device),
             badgeNo(device),
             deptName(device),
-            Boolean.TRUE.equals(device.getOnline()) ? "ONLINE" : "OFFLINE",
+            isDeviceOnline(device) ? "ONLINE" : "OFFLINE",
             value(device.getBatteryPercent()),
             value(device.getSignalBars()),
             blankToDefault(device.getFirmwareVersion(), "-"),
@@ -1317,7 +1296,7 @@ public class PatrolController {
             capabilities,
             wifi,
             toDeviceSettingsDto(config),
-            config == null ? false : Boolean.TRUE.equals(config.getRealtimeAudioSyncing()),
+            false,
             config == null ? "-" : formatDate(config.getLastMediaSyncAt())
         );
     }
@@ -1495,13 +1474,17 @@ public class PatrolController {
     }
 
     private SosVo toSosVo(PatrolSosEvent event) {
+        PatrolDevice device = event.getDeviceId() == null || event.getDeviceId().isBlank() ? null : deviceMapper.selectById(event.getDeviceId());
         return new SosVo(
             event.getSosId(),
-            "-",
-            "-",
-            "-",
-            "",
+            blankToDefault(event.getOfficerName(), device == null ? "-" : officerName(device)),
+            blankToDefault(event.getBadgeNo(), device == null ? "-" : badgeNo(device)),
+            blankToDefault(event.getDeptName(), device == null ? "-" : deptName(device)),
+            blankToDefault(event.getDeviceId(), ""),
             blankToDefault(event.getAddress(), "-"),
+            event.getLatitude(),
+            event.getLongitude(),
+            event.getAccuracyMeters(),
             event.getPhase(),
             blankToDefault(event.getMessage(), "等待处置"),
             Boolean.TRUE.equals(event.getRecordingAudio()),
@@ -1565,19 +1548,7 @@ public class PatrolController {
     }
 
     private PatrolAreaVo fallbackPatrolArea() {
-        List<PatrolGeoPointVo> boundary = List.of(
-            new PatrolGeoPointVo(26.1048, 119.3009),
-            new PatrolGeoPointVo(26.1044, 119.3137),
-            new PatrolGeoPointVo(26.0977, 119.3145),
-            new PatrolGeoPointVo(26.0968, 119.3024)
-        );
-        List<PatrolGeoPointVo> route = List.of(
-            new PatrolGeoPointVo(26.1036, 119.3025),
-            new PatrolGeoPointVo(26.1017, 119.3065),
-            new PatrolGeoPointVo(26.0995, 119.3104),
-            new PatrolGeoPointVo(26.0979, 119.3131)
-        );
-        return new PatrolAreaVo("AREA-FZ-WQ-001", "五四路核心勤务区", "PTL-GROUP-A", "第一巡逻支队 A 组", "TEAM", "", "", boundary, route, "-");
+        return new PatrolAreaVo("", "未配置巡区", "", "", "UNASSIGNED", "", "", List.of(), List.of(), "-");
     }
 
     private List<PatrolGeoPointVo> parseGeoPoints(String json) {
@@ -1607,7 +1578,7 @@ public class PatrolController {
     }
 
     private String workState(PatrolDevice device) {
-        if (!Boolean.TRUE.equals(device.getOnline())) {
+        if (!isDeviceOnline(device)) {
             return "OFFLINE";
         }
         if (value(device.getBatteryPercent()) < 20) {
@@ -1617,6 +1588,13 @@ public class PatrolController {
             return "TALKING";
         }
         return blankToDefault(device.getRecordingStatus(), "IDLE");
+    }
+
+    private boolean isDeviceOnline(PatrolDevice device) {
+        if (device == null || !Boolean.TRUE.equals(device.getOnline()) || device.getLastHeartbeatTime() == null) {
+            return false;
+        }
+        return System.currentTimeMillis() - device.getLastHeartbeatTime().getTime() <= DEVICE_HEARTBEAT_TIMEOUT_MILLIS;
     }
 
     private String officerNameByDevice(String deviceId) {
@@ -2041,16 +2019,20 @@ public class PatrolController {
     private List<MessageRecipient> resolveMessageRecipients(String targetId, String targetType) {
         List<MessageRecipient> recipients = new ArrayList<>();
         if ("ORG".equals(targetType)) {
+            Long deptId = parseLongOrNull(targetId);
+            if (deptId == null) {
+                throw new ServiceException("组织目标必须使用有效的组织ID");
+            }
             deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
-                    .eq(PatrolDeviceBinding::getBindStatus, "BOUND"))
+                    .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                    .eq(PatrolDeviceBinding::getDeptId, deptId))
                 .forEach(binding -> recipients.add(toMessageRecipient(binding, targetId)));
         } else if ("DEVICE".equals(targetType)) {
             PatrolDeviceBinding binding = activeBinding(targetId);
             if (binding == null) {
-                recipients.add(new MessageRecipient(targetId, targetName(targetId, targetType), targetId));
-            } else {
-                recipients.add(toMessageRecipient(binding, targetId));
+                throw new ServiceException("目标设备未绑定在线警员：" + targetId);
             }
+            recipients.add(toMessageRecipient(binding, targetId));
         } else {
             PatrolDeviceBinding binding = activeBindingByBadgeNo(targetId);
             if (binding == null) {
@@ -2256,18 +2238,6 @@ public class PatrolController {
     public record DispatchChannelVo(String channelId, String deviceId, String officerName, String deptName, String state, String mode, Integer latencyMs, String locationText, Boolean talking) {
     }
 
-    public record DispatchSessionBo(String deviceId, String mode) {
-    }
-
-    public record DispatchSessionVo(String sessionId, String deviceId, String mode, String relayUrl, String state) {
-    }
-
-    public record DispatchActionVo(String sessionId, String nextState, String message) {
-    }
-
-    public record TalkSessionVo(String talkId, String sessionId, String state, String talkUrl) {
-    }
-
     public record OfficerLocationVo(String badgeNo, String officerName, String deptName, String deviceId, BigDecimal latitude, BigDecimal longitude, String address, String onlineStatus, Integer batteryPercent, String reportedAt) {
     }
 
@@ -2337,7 +2307,7 @@ public class PatrolController {
     public record FirmwareUpgradeTaskVo(String taskId, String deviceId, String firmwareId, String operatorId, String fromVersion, String toVersion, String status, Float progress, String errorCode, String errorMessage, String startedAt, String finishedAt) {
     }
 
-    public record SosVo(String sosId, String officerName, String badgeNo, String deptName, String deviceId, String locationText, String status, String disposition, Boolean recordingAudio, Integer backupEtaMinutes, String createdAt) {
+    public record SosVo(String sosId, String officerName, String badgeNo, String deptName, String deviceId, String locationText, Double latitude, Double longitude, Float accuracyMeters, String status, String disposition, Boolean recordingAudio, Integer backupEtaMinutes, String createdAt) {
     }
 
     public record SosActionVo(String sosId, String status, String message) {
@@ -2347,9 +2317,6 @@ public class PatrolController {
     }
 
     public record SosBackupBo(String contactName, String contactPhone, Integer backupEtaMinutes, String note) {
-    }
-
-    public record SosRecordingBo(String fileId, String fileName, String note) {
     }
 
     public record SosContactBo(String contactName, String contactPhone, String note) {
