@@ -95,6 +95,7 @@ public class PatrolAppApiController {
         return ok(patrolAppService.login(request));
     }
 
+    @SaIgnore
     @PostMapping("/auth/refresh")
     public ApiEnvelope<AuthSessionDto> refresh(@RequestBody Map<String, String> request) {
         return ok(patrolAppService.refresh(request));

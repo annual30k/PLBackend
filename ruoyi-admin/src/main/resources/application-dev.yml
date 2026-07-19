@@ -284,4 +284,5 @@ patrol:
     # App 真机不能访问 localhost、127.0.0.1 或 Docker 内部服务名。
     # 本地联调时配置为宿主机局域网地址；公网部署时只需改为 HTTPS 文件/CDN 域名。
     # public-base-url: "http://192.168.11.157:9000"
-    public-base-url: "http://192.168.1.3:9000"
+#    public-base-url: "http://192.168.1.3:9000"
+    public-base-url: "http://172.20.10.4:9000"

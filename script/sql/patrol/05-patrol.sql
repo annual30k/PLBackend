@@ -607,7 +607,7 @@ create table if not exists patrol_firmware_upgrade_task (
     key idx_patrol_firmware_task_status (tenant_id, status)
 ) engine=innodb default charset=utf8mb4 comment='设备固件升级任务表';
 
-insert ignore into sys_user values(9527, '000000', 103, 'POLICE_9527', '张警官', 'sys_user', 'zhang.police@city.gov.cn', '13800009527', '0', null, '$2a$10$X7Dwu6JiORKduaP8iS9sOOgUk/w93X63gAg2XAGGAXRs0KbiaNSki', '0', '0', '127.0.0.1', sysdate(), 103, 1, sysdate(), null, null, '移动端巡逻警员');
+insert ignore into sys_user values(9527, '000000', 103, 'test', '张警官', 'sys_user', 'zhang.police@city.gov.cn', '13800009527', '0', null, '$2a$10$X7Dwu6JiORKduaP8iS9sOOgUk/w93X63gAg2XAGGAXRs0KbiaNSki', '0', '0', '127.0.0.1', sysdate(), 103, 1, sysdate(), null, null, '移动端巡逻警员');
 insert ignore into sys_user_role values ('9527', '3');
 insert ignore into sys_user_post values ('9527', '4');
 
@@ -619,13 +619,13 @@ insert ignore into patrol_media (
 ) values
     (95270001, '000000', 'SEED-ZHANG-VIDEO-20260515', '张警官_商业街巡逻视频_20260515.mp4', 'VIDEO', '09:18:32', '37.8 KB', 38695, 'video/mp4',
      '00:03', 1, 'PHONE', 'DONE', 1, '/files/SEED-ZHANG-VIDEO-20260515/download', 'patrol-samples', 'classpath:patrol-samples/zhang-duty-video.mp4',
-     '987a0de57d266af646a014f8b4e77c964ccfbf5fdf07858e8ff6ad766579e827', 'wm-seed-zhang-video-20260515', 'POLICE_9527', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-POLICE_9527-20260515', 'SEED_SAMPLE',
+     '987a0de57d266af646a014f8b4e77c964ccfbf5fdf07858e8ff6ad766579e827', 'wm-seed-zhang-video-20260515', 'test', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-test-20260515', 'SEED_SAMPLE',
      103, 9527, sysdate(), '0'),
     (95270002, '000000', 'SEED-ZHANG-AUDIO-20260515', '张警官_现场询问录音_20260515.wav', 'AUDIO', '10:42:08', '344.6 KB', 352878, 'audio/wav',
      '00:04', 1, 'PHONE', 'DONE', 1, '/files/SEED-ZHANG-AUDIO-20260515/download', 'patrol-samples', 'classpath:patrol-samples/zhang-duty-audio.wav',
-     '444757312b89160cefae137c2e95571ba26211b03ec58def3756a03837942765', 'wm-seed-zhang-audio-20260515', 'POLICE_9527', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-POLICE_9527-20260515', 'SEED_SAMPLE',
+     '444757312b89160cefae137c2e95571ba26211b03ec58def3756a03837942765', 'wm-seed-zhang-audio-20260515', 'test', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-test-20260515', 'SEED_SAMPLE',
      103, 9527, sysdate(), '0'),
     (95270003, '000000', 'SEED-ZHANG-PHOTO-20260515', '张警官_重点点位照片_20260515.jpg', 'PHOTO', '14:06:25', '19.3 KB', 19736, 'image/jpeg',
      null, 1, 'PHONE', 'DONE', 1, '/files/SEED-ZHANG-PHOTO-20260515/download', 'patrol-samples', 'classpath:patrol-samples/zhang-duty-photo.jpg',
-     'fe3036243614d7cd3148b42e6637e618910714d931a5d2d5c120ea4c63bc8105', 'wm-seed-zhang-photo-20260515', 'POLICE_9527', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-POLICE_9527-20260515', 'SEED_SAMPLE',
+     'fe3036243614d7cd3148b42e6637e618910714d931a5d2d5c120ea4c63bc8105', 'wm-seed-zhang-photo-20260515', 'test', '张警官', 'DEV-GLASS-9527', 'DAILY_REPORT', 'MISSION-test-20260515', 'SEED_SAMPLE',
      103, 9527, sysdate(), '0');

@@ -147,6 +147,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     private static final String APP_CLIENT_KEY = "app";
     private static final String DEFAULT_DEVICE_ID = "";
     private static final long DEFAULT_CHUNK_SIZE = 8L * 1024L * 1024L;
+    private static final long ACCESS_TOKEN_TTL_SECONDS = 604800L;
+    private static final long ACCESS_TOKEN_ACTIVE_TTL_SECONDS = 1800L;
+    private static final Duration REFRESH_TOKEN_TTL = Duration.ofDays(30);
+    private static final String REFRESH_TOKEN_PREFIX = "patrol:auth:refresh:";
     private static final Duration INTERCOM_TTL = Duration.ofMinutes(30);
     private static final String INTERCOM_SESSION_PREFIX = "patrol:intercom:session:";
     private static final String INTERCOM_PENDING_PREFIX = "patrol:intercom:pending:";
@@ -194,19 +198,47 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         LoginUser loginUser = buildLoginUser(user);
         loginUser.setClientKey(APP_CLIENT_KEY);
         loginUser.setDeviceType("android");
-        SaLoginParameter model = new SaLoginParameter()
-            .setDeviceType("android")
-            .setTimeout(604800L)
-            .setActiveTimeout(1800L)
-            .setExtra(LoginHelper.CLIENT_KEY, APP_CLIENT_ID);
-        LoginHelper.login(loginUser, model);
-        return new AuthSessionDto(StpUtil.getTokenValue(), "refresh-" + StpUtil.getTokenValue(), StpUtil.getTokenTimeout(), "Bearer");
+        return issueSession(loginUser);
     }
 
     @Override
     public AuthSessionDto refresh(Map<String, String> request) {
-        StpUtil.updateLastActiveToNow();
-        return new AuthSessionDto(StpUtil.getTokenValue(), request.getOrDefault("refreshToken", "refresh-" + StpUtil.getTokenValue()), StpUtil.getTokenTimeout(), "Bearer");
+        String refreshToken = request == null ? "" : blankToDefault(request.get("refreshToken"), "").trim();
+        if (refreshToken.isBlank()) {
+            throw new ServiceException("刷新令牌不能为空");
+        }
+        String refreshKey = REFRESH_TOKEN_PREFIX + refreshToken;
+        Long userId = RedisUtils.getClient().<Long>getBucket(refreshKey).getAndDelete();
+        if (userId == null && refreshToken.startsWith("refresh-") && StpUtil.isLogin()) {
+            // Migration path for sessions issued before refresh-token rotation existed; a live access token is required.
+            userId = LoginHelper.getUserId();
+        }
+        if (userId == null) {
+            throw new ServiceException("刷新令牌无效或已过期");
+        }
+        Long resolvedUserId = userId;
+        SysUserVo user = TenantHelper.dynamic(TENANT_ID, () -> userMapper.selectVoOne(new LambdaQueryWrapper<SysUser>()
+            .eq(SysUser::getUserId, resolvedUserId)));
+        if (ObjectUtil.isNull(user) || !SystemConstants.NORMAL.equals(user.getStatus())) {
+            throw new ServiceException("用户不存在或已停用");
+        }
+        LoginUser loginUser = buildLoginUser(user);
+        loginUser.setClientKey(APP_CLIENT_KEY);
+        loginUser.setDeviceType("android");
+        return issueSession(loginUser);
+    }
+
+    private AuthSessionDto issueSession(LoginUser loginUser) {
+        SaLoginParameter model = new SaLoginParameter()
+            .setDeviceType("android")
+            .setTimeout(ACCESS_TOKEN_TTL_SECONDS)
+            .setActiveTimeout(ACCESS_TOKEN_ACTIVE_TTL_SECONDS)
+            .setExtra(LoginHelper.CLIENT_KEY, APP_CLIENT_ID);
+        LoginHelper.login(loginUser, model);
+        String refreshToken = IdUtil.fastSimpleUUID();
+        RedisUtils.setCacheObject(REFRESH_TOKEN_PREFIX + refreshToken, loginUser.getUserId(), REFRESH_TOKEN_TTL);
+        long expiresIn = Math.min(StpUtil.getTokenTimeout(), ACCESS_TOKEN_ACTIVE_TTL_SECONDS);
+        return new AuthSessionDto(StpUtil.getTokenValue(), refreshToken, expiresIn, "Bearer");
     }
 
     @Override
@@ -592,7 +624,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             LoginUser loginUser = LoginHelper.getLoginUser();
             String taskId = "UP-" + IdUtil.fastSimpleUUID();
             long chunkSize = request.getChunkSizeBytes() > 0 ? request.getChunkSizeBytes() : DEFAULT_CHUNK_SIZE;
-            int totalChunks = request.getTotalChunks() > 0 ? request.getTotalChunks() : (int) Math.ceil(request.getFileSizeBytes() * 1D / chunkSize);
+            int totalChunks = expectedChunkCount(request.getFileSizeBytes(), chunkSize);
             PatrolMediaUploadTask task = new PatrolMediaUploadTask();
             task.setTaskId(taskId);
             task.setTenantId(TENANT_ID);
@@ -605,7 +637,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             task.setTotalChunks(totalChunks);
             task.setUploadedChunks(0);
             task.setUploadedBytes(0L);
-            task.setExpectedSha256(blankToDefault(request.getSha256(), ""));
+            task.setExpectedSha256(request.getSha256().trim().toLowerCase());
             task.setStorageSide(blankToDefault(request.getStorageSide(), "PHONE"));
             task.setBizType(blankToDefault(request.getBizType(), "MEDIA"));
             task.setBizId(blankToDefault(request.getBizId(), taskId));
@@ -643,6 +675,11 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             if (chunk == null || chunk.isEmpty()) {
                 throw new ServiceException("上传分片不能为空");
             }
+            long offset = (long) chunkIndex * task.getChunkSizeBytes();
+            long expectedChunkSize = Math.min(task.getChunkSizeBytes(), task.getFileSizeBytes() - offset);
+            if (expectedChunkSize <= 0 || chunk.getSize() != expectedChunkSize) {
+                throw new ServiceException("分片大小不正确，期望 " + expectedChunkSize + " 字节，实际 " + chunk.getSize() + " 字节");
+            }
             Path partPath = uploadTaskDir(taskId).resolve(chunkIndex + ".part");
             try {
                 Files.createDirectories(partPath.getParent());
@@ -677,8 +714,12 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             task.setProgress(0.99F);
             mediaUploadTaskMapper.updateById(task);
             File merged = mergeUploadTask(task);
+            if (merged.length() != task.getFileSizeBytes()) {
+                markUploadTaskFailed(task, "合并文件大小不一致");
+                throw new ServiceException("合并文件大小不一致");
+            }
             String actualSha256 = sha256(merged);
-            if (task.getExpectedSha256() != null && !task.getExpectedSha256().isBlank() && !task.getExpectedSha256().equalsIgnoreCase(actualSha256)) {
+            if (!task.getExpectedSha256().equalsIgnoreCase(actualSha256)) {
                 markUploadTaskFailed(task, "SHA-256不一致");
                 throw new ServiceException("SHA-256不一致");
             }
@@ -692,8 +733,8 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             media.setFileName(task.getFileName());
             media.setMediaType(task.getMediaType());
             media.setCapturedAt(uploadedAt);
-            media.setSizeText(sizeText(value(task.getFileSizeBytes(), merged.length())));
-            media.setFileSizeBytes(value(task.getFileSizeBytes(), merged.length()));
+            media.setSizeText(sizeText(merged.length()));
+            media.setFileSizeBytes(merged.length());
             media.setMimeType(task.getMimeType());
             media.setSha256Verified(true);
             media.setStorageSide(task.getStorageSide());
@@ -2058,28 +2099,18 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     private boolean matchesFirmwareVersionRange(PatrolFirmwareVersion firmware, String currentVersion) {
-        long current = firmwareVersionRank(currentVersion);
-        long min = firmwareVersionRank(firmware.getMinCurrentVersion());
-        long max = firmwareVersionRank(firmware.getMaxCurrentVersion());
-        if (min > 0 && current > 0 && current < min) {
+        if (!FirmwareVersionComparator.isParsable(currentVersion)) {
+            return true;
+        }
+        String min = firmware.getMinCurrentVersion();
+        String max = firmware.getMaxCurrentVersion();
+        if (FirmwareVersionComparator.isParsable(min) && FirmwareVersionComparator.compare(currentVersion, min) < 0) {
             return false;
         }
-        if (max > 0 && current > 0 && current > max) {
+        if (FirmwareVersionComparator.isParsable(max) && FirmwareVersionComparator.compare(currentVersion, max) > 0) {
             return false;
         }
         return true;
-    }
-
-    private long firmwareVersionRank(String version) {
-        String digits = blankToDefault(version, "").replaceAll("\\D+", "");
-        if (digits.isBlank()) {
-            return 0L;
-        }
-        try {
-            return Long.parseLong(digits.length() > 12 ? digits.substring(digits.length() - 12) : digits);
-        } catch (NumberFormatException e) {
-            return 0L;
-        }
     }
 
     private <T> PageEnvelope<T> page(List<T> items, int page, int pageSize) {
@@ -2126,11 +2157,29 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         if (request.getFileSizeBytes() <= 0) {
             throw new ServiceException("文件大小必须大于0");
         }
-        long chunkSize = request.getChunkSizeBytes() > 0 ? request.getChunkSizeBytes() : DEFAULT_CHUNK_SIZE;
-        int totalChunks = request.getTotalChunks() > 0 ? request.getTotalChunks() : (int) Math.ceil(request.getFileSizeBytes() * 1D / chunkSize);
-        if (chunkSize <= 0 || totalChunks <= 0) {
+        if (request.getChunkSizeBytes() < 0 || request.getTotalChunks() < 0) {
             throw new ServiceException("分片参数不合法");
         }
+        long chunkSize = request.getChunkSizeBytes() > 0 ? request.getChunkSizeBytes() : DEFAULT_CHUNK_SIZE;
+        if (chunkSize <= 0) {
+            throw new ServiceException("分片参数不合法");
+        }
+        int expectedChunks = expectedChunkCount(request.getFileSizeBytes(), chunkSize);
+        if (request.getTotalChunks() > 0 && request.getTotalChunks() != expectedChunks) {
+            throw new ServiceException("分片总数与文件大小不匹配");
+        }
+        String expectedSha256 = blankToDefault(request.getSha256(), "").trim();
+        if (!expectedSha256.matches("(?i)^[0-9a-f]{64}$")) {
+            throw new ServiceException("必须提供有效的SHA-256");
+        }
+    }
+
+    private int expectedChunkCount(long fileSizeBytes, long chunkSizeBytes) {
+        long totalChunks = 1L + (fileSizeBytes - 1L) / chunkSizeBytes;
+        if (totalChunks > Integer.MAX_VALUE) {
+            throw new ServiceException("分片数量过多");
+        }
+        return (int) totalChunks;
     }
 
     private PatrolMediaUploadTask getUploadTask(String taskId) {
