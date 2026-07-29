@@ -118,6 +118,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -139,6 +140,12 @@ public class PatrolController {
     private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final long DEVICE_HEARTBEAT_TIMEOUT_MILLIS = 45_000L;
+    private static final Set<String> SUPPORTED_DEVICE_COMMANDS = Set.of("TAKE_PHOTO", "START_RECORD", "STOP_RECORD");
+    private static final Map<String, Set<String>> DAILY_REPORT_STATUS_TRANSITIONS = Map.of(
+        "PENDING_REVIEW", Set.of("REVIEWED"),
+        "REVIEWED", Set.of("ARCHIVED"),
+        "ARCHIVED", Set.of()
+    );
 
     private final PatrolDeviceMapper deviceMapper;
     private final PatrolDeviceCommandMapper commandMapper;
@@ -253,25 +260,52 @@ public class PatrolController {
 
     @PostMapping("/devices/{deviceId}/commands")
     public R<CommandResultVo> command(@PathVariable String deviceId, @RequestBody DeviceCommandBo command) {
+        if (deviceId == null || deviceId.isBlank() || deviceMapper.selectById(deviceId) == null) {
+            throw new ServiceException("设备不存在：" + blankToDefault(deviceId, "-"));
+        }
+        if (activeBinding(deviceId) == null) {
+            throw new ServiceException("设备尚未绑定警员，无法下发指令");
+        }
+        if (command == null || command.command() == null || command.command().isBlank()) {
+            throw new ServiceException("设备指令不能为空");
+        }
+        String normalizedCommand = command.command().trim().toUpperCase(Locale.ROOT);
+        if (!SUPPORTED_DEVICE_COMMANDS.contains(normalizedCommand)) {
+            throw new ServiceException("不支持的设备指令：" + normalizedCommand);
+        }
+        String requestId = command.requestId() == null ? null : command.requestId().trim();
+        if (requestId != null && !requestId.isBlank()) {
+            PatrolDeviceCommand existing = commandMapper.selectList(new LambdaQueryWrapper<PatrolDeviceCommand>()
+                    .eq(PatrolDeviceCommand::getDeviceId, deviceId)
+                    .eq(PatrolDeviceCommand::getRequestId, requestId)
+                    .orderByDesc(PatrolDeviceCommand::getSentAt))
+                .stream()
+                .findFirst()
+                .orElse(null);
+            if (existing != null) {
+                return R.ok(new CommandResultVo(existing.getCommandId(), existing.getDeviceId(), existing.getCommand(),
+                    existing.getStatus(), existing.getResultMessage()));
+            }
+        }
         String commandId = "CMD-" + UUID.randomUUID();
         Date now = new Date();
         PatrolDeviceCommand record = new PatrolDeviceCommand();
         record.setCommandId(commandId);
         record.setTenantId(currentTenantId());
         record.setDeviceId(deviceId);
-        record.setCommand(command.command());
-        record.setOperatorId(blankToDefault(command.operatorId(), currentOperator()));
-        record.setRequestId(command.requestId());
+        record.setCommand(normalizedCommand);
+        record.setOperatorId(currentOperator());
+        record.setRequestId(requestId);
         record.setStatus("QUEUED");
         record.setResultMessage("指令已进入下行队列，等待 Android 拉取和设备真实回执");
         record.setSentAt(now);
         record.setDelFlag("0");
         commandMapper.insert(record);
-        saveDeviceEvent(deviceId, "COMMAND", "INFO", "平台下发设备指令", command.command());
-        logAudit("COMMAND", "下发设备指令：" + command.command(), deviceId, "SUCCESS");
-        realtimePublisher.publish("DEVICE_COMMAND", "devices", "平台下发设备指令", deviceId + " " + command.command(), deviceId,
-            realtimePublisher.payload("commandId", commandId, "deviceId", deviceId, "command", command.command(), "status", "QUEUED"));
-        return R.ok(new CommandResultVo(commandId, deviceId, command.command(), "QUEUED", record.getResultMessage()));
+        saveDeviceEvent(deviceId, "COMMAND", "INFO", "平台下发设备指令", normalizedCommand);
+        logAudit("COMMAND", "下发设备指令：" + normalizedCommand, deviceId, "SUCCESS");
+        realtimePublisher.publish("DEVICE_COMMAND", "devices", "平台下发设备指令", deviceId + " " + normalizedCommand, deviceId,
+            realtimePublisher.payload("commandId", commandId, "deviceId", deviceId, "command", normalizedCommand, "status", "QUEUED"));
+        return R.ok(new CommandResultVo(commandId, deviceId, normalizedCommand, "QUEUED", record.getResultMessage()));
     }
 
     @GetMapping("/devices/commands")
@@ -283,14 +317,13 @@ public class PatrolController {
     }
 
     @GetMapping("/devices/{deviceId}/commands")
-    public R<List<CommandLogVo>> deviceCommands(@PathVariable String deviceId) {
-        return R.ok(commandMapper.selectList(new LambdaQueryWrapper<PatrolDeviceCommand>()
-                .eq(PatrolDeviceCommand::getDeviceId, deviceId)
-                .orderByDesc(PatrolDeviceCommand::getSentAt))
-            .stream()
-            .limit(20)
-            .map(this::toCommandLogVo)
-            .toList());
+    public R<PageEnvelope<CommandLogVo>> deviceCommands(
+        @PathVariable String deviceId,
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(commandMapper, new LambdaQueryWrapper<PatrolDeviceCommand>()
+            .eq(PatrolDeviceCommand::getDeviceId, deviceId)
+            .orderByDesc(PatrolDeviceCommand::getSentAt), page, pageSize, this::toCommandLogVo));
     }
 
     @GetMapping("/devices/events")
@@ -302,22 +335,27 @@ public class PatrolController {
     }
 
     @GetMapping("/devices/{deviceId}/events")
-    public R<List<DeviceEventVo>> deviceEvents(@PathVariable String deviceId) {
-        return R.ok(deviceEventMapper.selectList(new LambdaQueryWrapper<PatrolDeviceEvent>()
-                .eq(PatrolDeviceEvent::getDeviceId, deviceId)
-                .orderByDesc(PatrolDeviceEvent::getOccurredAt))
-            .stream()
-            .limit(50)
-            .map(this::toDeviceEventVo)
-            .toList());
+    public R<PageEnvelope<DeviceEventVo>> deviceEvents(
+        @PathVariable String deviceId,
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(deviceEventMapper, new LambdaQueryWrapper<PatrolDeviceEvent>()
+            .eq(PatrolDeviceEvent::getDeviceId, deviceId)
+            .orderByDesc(PatrolDeviceEvent::getOccurredAt), page, pageSize, this::toDeviceEventVo));
     }
 
     @GetMapping("/dispatch/channels")
-    public R<List<DispatchChannelVo>> dispatchChannels() {
-        return R.ok(deviceMapper.selectList(new LambdaQueryWrapper<PatrolDevice>().eq(PatrolDevice::getOnline, true)).stream()
-            .filter(this::isDeviceOnline)
-            .map(item -> new DispatchChannelVo("CH-" + item.getDeviceId(), item.getDeviceId(), officerName(item), deptName(item), Boolean.TRUE.equals(item.getTalking()) ? "INTERCOM" : "READY", "WebRTC/VoIP", 0, blankToDefault(item.getAddress(), "未知位置"), Boolean.TRUE.equals(item.getTalking())))
-            .toList());
+    public R<PageEnvelope<DispatchChannelVo>> dispatchChannels(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(deviceMapper, new LambdaQueryWrapper<PatrolDevice>()
+                .eq(PatrolDevice::getOnline, true)
+                .ge(PatrolDevice::getLastHeartbeatTime, new Date(System.currentTimeMillis() - DEVICE_HEARTBEAT_TIMEOUT_MILLIS))
+                .orderByDesc(PatrolDevice::getLastHeartbeatTime),
+            page, pageSize,
+            item -> new DispatchChannelVo("CH-" + item.getDeviceId(), item.getDeviceId(), officerName(item), deptName(item),
+                Boolean.TRUE.equals(item.getTalking()) ? "INTERCOM" : "READY", "WebRTC/VoIP", 0,
+                blankToDefault(item.getAddress(), "未知位置"), Boolean.TRUE.equals(item.getTalking()))));
     }
 
     @PostMapping("/dispatch/intercom/sessions")
@@ -341,10 +379,15 @@ public class PatrolController {
     }
 
     @GetMapping("/map/officers")
-    public R<List<OfficerLocationVo>> officerLocations() {
-        return R.ok(deviceMapper.selectList().stream()
-            .filter(item -> item.getLatitude() != null && item.getLongitude() != null)
-            .map(item -> new OfficerLocationVo(
+    public R<PageEnvelope<OfficerLocationVo>> officerLocations(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(deviceMapper, new LambdaQueryWrapper<PatrolDevice>()
+                .isNotNull(PatrolDevice::getLatitude)
+                .isNotNull(PatrolDevice::getLongitude)
+                .orderByDesc(PatrolDevice::getLastHeartbeatTime),
+            page, pageSize,
+            item -> new OfficerLocationVo(
                 badgeNo(item),
                 officerName(item),
                 deptName(item),
@@ -355,29 +398,26 @@ public class PatrolController {
                 isDeviceOnline(item) ? "ONLINE" : "OFFLINE",
                 value(item.getBatteryPercent()),
                 formatDate(item.getLastHeartbeatTime())
-            ))
-            .toList());
+            )));
     }
 
     @GetMapping("/map/officers/{badgeNo}/track")
-    public R<List<TrackPointVo>> officerTrack(@PathVariable String badgeNo) {
-        return R.ok(locationTrackMapper.selectList(new LambdaQueryWrapper<PatrolLocationTrack>()
-                .eq(PatrolLocationTrack::getBadgeNo, badgeNo)
-                .orderByDesc(PatrolLocationTrack::getReportedAt))
-            .stream()
-            .limit(100)
-            .map(this::toTrackPointVo)
-            .toList());
+    public R<PageEnvelope<TrackPointVo>> officerTrack(
+        @PathVariable String badgeNo,
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(locationTrackMapper, new LambdaQueryWrapper<PatrolLocationTrack>()
+            .eq(PatrolLocationTrack::getBadgeNo, badgeNo)
+            .orderByDesc(PatrolLocationTrack::getReportedAt), page, pageSize, this::toTrackPointVo));
     }
 
     @GetMapping("/areas")
-    public R<List<PatrolAreaVo>> patrolAreas() {
-        return R.ok(areaMapper.selectList(new LambdaQueryWrapper<PatrolArea>()
-                .orderByDesc(PatrolArea::getUpdateTime)
-                .orderByDesc(PatrolArea::getCreateTime))
-            .stream()
-            .map(this::toPatrolAreaVo)
-            .toList());
+    public R<PageEnvelope<PatrolAreaVo>> patrolAreas(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(areaMapper, new LambdaQueryWrapper<PatrolArea>()
+            .orderByDesc(PatrolArea::getUpdateTime)
+            .orderByDesc(PatrolArea::getCreateTime), page, pageSize, this::toPatrolAreaVo));
     }
 
     @GetMapping("/areas/current")
@@ -453,23 +493,23 @@ public class PatrolController {
     }
 
     @GetMapping("/alerts/{alertId}/attachments")
-    public R<List<AlertAttachmentVo>> alertAttachments(@PathVariable String alertId) {
-        return R.ok(alertAttachmentMapper.selectList(new LambdaQueryWrapper<PatrolAlertAttachment>()
-                .eq(PatrolAlertAttachment::getAlertId, alertId)
-                .orderByDesc(PatrolAlertAttachment::getCreateTime))
-            .stream()
-            .map(this::toAlertAttachmentVo)
-            .toList());
+    public R<PageEnvelope<AlertAttachmentVo>> alertAttachments(
+        @PathVariable String alertId,
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(alertAttachmentMapper, new LambdaQueryWrapper<PatrolAlertAttachment>()
+            .eq(PatrolAlertAttachment::getAlertId, alertId)
+            .orderByDesc(PatrolAlertAttachment::getCreateTime), page, pageSize, this::toAlertAttachmentVo));
     }
 
     @GetMapping("/alerts/{alertId}/dispositions")
-    public R<List<AlertDispositionVo>> alertDispositions(@PathVariable String alertId) {
-        return R.ok(alertDispositionMapper.selectList(new LambdaQueryWrapper<PatrolAlertDisposition>()
-                .eq(PatrolAlertDisposition::getAlertId, alertId)
-                .orderByDesc(PatrolAlertDisposition::getOccurredAt))
-            .stream()
-            .map(this::toAlertDispositionVo)
-            .toList());
+    public R<PageEnvelope<AlertDispositionVo>> alertDispositions(
+        @PathVariable String alertId,
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(alertDispositionMapper, new LambdaQueryWrapper<PatrolAlertDisposition>()
+            .eq(PatrolAlertDisposition::getAlertId, alertId)
+            .orderByDesc(PatrolAlertDisposition::getOccurredAt), page, pageSize, this::toAlertDispositionVo));
     }
 
     @GetMapping("/media")
@@ -534,7 +574,25 @@ public class PatrolController {
         if (report == null) {
             throw new ServiceException("日报不存在");
         }
-        report.setStatus(blankToDefault(bo.status(), "REVIEWED"));
+        if (bo == null || bo.status() == null || bo.status().isBlank()) {
+            throw new ServiceException("日报状态不能为空");
+        }
+        String currentStatus = blankToDefault(report.getStatus(), "PENDING_REVIEW").trim().toUpperCase(Locale.ROOT);
+        String nextStatus = bo.status().trim().toUpperCase(Locale.ROOT);
+        if (!DAILY_REPORT_STATUS_TRANSITIONS.containsKey(currentStatus)
+            || !DAILY_REPORT_STATUS_TRANSITIONS.containsKey(nextStatus)) {
+            throw new ServiceException("不支持的日报状态");
+        }
+        if (currentStatus.equals(nextStatus)) {
+            return R.ok(toDailyReportVo(report));
+        }
+        if (!DAILY_REPORT_STATUS_TRANSITIONS.get(currentStatus).contains(nextStatus)) {
+            throw new ServiceException("日报状态不能从 " + currentStatus + " 变更为 " + nextStatus);
+        }
+        if (report.getContent() == null || report.getContent().isBlank()) {
+            throw new ServiceException("日报正文不能为空，请补充内容后再复核");
+        }
+        report.setStatus(nextStatus);
         dailyReportMapper.updateById(report);
         logAudit("DAILY_REPORT", "更新日报状态：" + report.getStatus(), reportId, "SUCCESS");
         realtimePublisher.publish("DAILY_REPORT_UPDATED", "reports", "日报状态已更新", reportId + " " + report.getStatus(), reportId,
@@ -548,7 +606,13 @@ public class PatrolController {
         if (report == null) {
             throw new ServiceException("日报不存在");
         }
-        report.setContent(blankToDefault(bo.content(), ""));
+        if ("ARCHIVED".equalsIgnoreCase(report.getStatus())) {
+            throw new ServiceException("已归档日报不可修改");
+        }
+        if (bo == null || bo.content() == null || bo.content().isBlank()) {
+            throw new ServiceException("日报正文不能为空");
+        }
+        report.setContent(bo.content().trim());
         dailyReportMapper.updateById(report);
         logAudit("DAILY_REPORT", "更新日报正文", reportId, "SUCCESS");
         realtimePublisher.publish("DAILY_REPORT_UPDATED", "reports", "日报正文已更新", reportId, reportId,
@@ -758,7 +822,10 @@ public class PatrolController {
     }
 
     @GetMapping("/sos/{sosId}/timeline")
-    public R<List<SosTimelineVo>> sosTimeline(@PathVariable String sosId) {
+    public R<PageEnvelope<SosTimelineVo>> sosTimeline(
+        @PathVariable String sosId,
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
         PatrolSosEvent event = sosEventMapper.selectById(sosId);
         List<SosTimelineVo> timeline = new ArrayList<>();
         if (event != null) {
@@ -804,7 +871,7 @@ public class PatrolController {
             ))
             .forEach(timeline::add);
         timeline.sort((left, right) -> left.occurredAt().compareTo(right.occurredAt()));
-        return R.ok(timeline);
+        return R.ok(pageList(timeline, page, pageSize));
     }
 
     @PostMapping("/sos/{sosId}/backup")
@@ -914,13 +981,13 @@ public class PatrolController {
     }
 
     @GetMapping("/messages/{messageId}/receipts")
-    public R<List<MessageReceiptVo>> messageReceipts(@PathVariable String messageId) {
-        return R.ok(messageReceiptMapper.selectList(new LambdaQueryWrapper<PatrolMessageReceipt>()
-                .eq(PatrolMessageReceipt::getMessageId, messageId)
-                .orderByAsc(PatrolMessageReceipt::getRecipientId))
-            .stream()
-            .map(this::toMessageReceiptVo)
-            .toList());
+    public R<PageEnvelope<MessageReceiptVo>> messageReceipts(
+        @PathVariable String messageId,
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(pageOf(messageReceiptMapper, new LambdaQueryWrapper<PatrolMessageReceipt>()
+            .eq(PatrolMessageReceipt::getMessageId, messageId)
+            .orderByAsc(PatrolMessageReceipt::getRecipientId), page, pageSize, this::toMessageReceiptVo));
     }
 
     @GetMapping("/control/persons")
@@ -1088,6 +1155,7 @@ public class PatrolController {
         List<PatrolAlert> alerts = alertMapper.selectList();
         List<PatrolMedia> media = mediaMapper.selectList();
         List<PatrolSosEvent> sosEvents = sosEventMapper.selectList();
+        List<PatrolDeviceCommand> commands = commandMapper.selectList();
         long onlineDevices = devices.stream().filter(this::isDeviceOnline).count();
         long totalDevices = devices.size();
         long closedAlerts = alerts.stream().filter(item -> "CLOSED".equals(item.getStatus())).count();
@@ -1100,11 +1168,9 @@ public class PatrolController {
                 new MetricVo("SOS 激活", String.valueOf(sosEvents.stream().filter(item -> "ACTIVE".equals(item.getPhase())).count()), "当前 ACTIVE", "warning"),
                 new MetricVo("媒体证据", String.valueOf(media.size()), "设备侧 + 云端", "info")
             ),
+            dailyTrend(alerts, sosEvents, media, commands),
             List.of(
-                new TrendPointVo("05-14", alerts.size(), sosEvents.size(), media.size(), commandMapper.selectCount(new LambdaQueryWrapper<>()).intValue())
-            ),
-            List.of(
-                new RankingItemVo("设备指令", Math.toIntExact(commandMapper.selectCount(new LambdaQueryWrapper<PatrolDeviceCommand>())), "指令次数"),
+                new RankingItemVo("设备指令", commands.size(), "指令次数"),
                 new RankingItemVo("未处置预警", Math.toIntExact(pendingAlerts), "当前积压"),
                 new RankingItemVo("媒体待校验", Math.toIntExact(media.stream().filter(item -> !Boolean.TRUE.equals(item.getSha256Verified())).count()), "证据完整性")
             ),
@@ -1166,6 +1232,16 @@ public class PatrolController {
         Page<E> result = mapper.selectPage(new Page<>(current, size), wrapper);
         List<V> items = result.getRecords().stream().map(converter).toList();
         return new PageEnvelope<>(items, current, size, result.getTotal(), current * (long) size < result.getTotal());
+    }
+
+    private <V> PageEnvelope<V> pageList(List<V> source, int page, int pageSize) {
+        int current = normalizePage(page);
+        int size = normalizePageSize(pageSize);
+        long total = source.size();
+        long offset = (long) (current - 1) * size;
+        int fromIndex = (int) Math.min(offset, source.size());
+        int toIndex = (int) Math.min((long) fromIndex + size, source.size());
+        return new PageEnvelope<>(source.subList(fromIndex, toIndex), current, size, total, current * (long) size < total);
     }
 
     private int normalizePage(int page) {
@@ -2124,6 +2200,50 @@ public class PatrolController {
     private String currentTenantId() {
         String tenantId = LoginHelper.getTenantId();
         return tenantId == null || tenantId.isBlank() ? "000000" : tenantId;
+    }
+
+    private List<TrendPointVo> dailyTrend(
+        List<PatrolAlert> alerts,
+        List<PatrolSosEvent> sosEvents,
+        List<PatrolMedia> media,
+        List<PatrolDeviceCommand> commands) {
+        LocalDate today = LocalDate.now();
+        List<TrendPointVo> trend = new ArrayList<>(7);
+        for (int daysAgo = 6; daysAgo >= 0; daysAgo--) {
+            LocalDate date = today.minusDays(daysAgo);
+            trend.add(new TrendPointVo(
+                DATE_FORMATTER.format(date),
+                Math.toIntExact(alerts.stream()
+                    .filter(item -> date.equals(businessDate(item.getOccurredAt(), item.getCreateTime())))
+                    .count()),
+                Math.toIntExact(sosEvents.stream()
+                    .filter(item -> date.equals(businessDate(null, item.getCreateTime())))
+                    .count()),
+                Math.toIntExact(media.stream()
+                    .filter(item -> date.equals(businessDate(item.getCapturedAt(), item.getCreateTime())))
+                    .count()),
+                Math.toIntExact(commands.stream()
+                    .filter(item -> date.equals(businessDate(null, item.getSentAt())))
+                    .count())
+            ));
+        }
+        return trend;
+    }
+
+    private LocalDate businessDate(String value, Date fallback) {
+        if (value != null) {
+            String normalized = value.trim();
+            if (normalized.length() >= 10) {
+                try {
+                    return LocalDate.parse(normalized.substring(0, 10), DATE_FORMATTER);
+                } catch (Exception ignored) {
+                    // Fall back to the persisted create time for legacy time-only values.
+                }
+            }
+        }
+        return fallback == null
+            ? null
+            : fallback.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     private String formatDate(Date date) {
