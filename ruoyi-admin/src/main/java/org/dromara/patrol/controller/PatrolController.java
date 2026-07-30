@@ -1,5 +1,6 @@
 package org.dromara.patrol.controller;
 
+import cn.dev33.satoken.annotation.SaIgnore;
 import cn.hutool.core.util.IdUtil;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -11,10 +12,12 @@ import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.ss.usermodel.WorkbookFactory;
+import org.dromara.common.core.constant.TenantConstants;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.sse.core.SseEmitterManager;
 import org.dromara.common.satoken.utils.LoginHelper;
+import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.patrol.domain.PatrolAlert;
 import org.dromara.patrol.domain.PatrolAlertAttachment;
 import org.dromara.patrol.domain.PatrolAlertDisposition;
@@ -75,9 +78,15 @@ import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.dromara.patrol.service.IPatrolAppService;
 import org.dromara.patrol.service.PatrolRealtimePublisher;
 import org.dromara.common.json.utils.JsonUtils;
+import org.dromara.system.domain.SysDept;
+import org.dromara.system.domain.SysUser;
 import org.dromara.system.domain.vo.SysOssVo;
+import org.dromara.system.domain.vo.SysDeptVo;
+import org.dromara.system.domain.vo.SysUserVo;
 import org.dromara.system.domain.SysOssConfig;
+import org.dromara.system.mapper.SysDeptMapper;
 import org.dromara.system.mapper.SysOssConfigMapper;
+import org.dromara.system.mapper.SysUserMapper;
 import org.dromara.system.service.ISysOssService;
 import org.redisson.spring.data.connection.RedissonConnectionFactory;
 import org.springframework.http.MediaType;
@@ -175,6 +184,8 @@ public class PatrolController {
     private final SseEmitterManager sseEmitterManager;
     private final ISysOssService ossService;
     private final SysOssConfigMapper ossConfigMapper;
+    private final SysDeptMapper sysDeptMapper;
+    private final SysUserMapper sysUserMapper;
     private final DataSource dataSource;
     private final RedissonConnectionFactory redisConnectionFactory;
 
@@ -199,6 +210,45 @@ public class PatrolController {
             workItems(alerts, sosEvents, devices),
             new PlatformCapacityVo(Math.toIntExact(onlineDevices), devices.size(), 16, "实时视频待 SDK 能力开放", "高德地图", "第三方人脸比对/车牌 OCR")
         ));
+    }
+
+    /**
+     * Public, read-only snapshot for the unauthenticated video wall.
+     * The response is deliberately limited to live map points, active SOS
+     * events and the configured patrol area.
+     */
+    @SaIgnore
+    @GetMapping("/video-wall/snapshot")
+    public R<VideoWallSnapshotVo> videoWallSnapshot() {
+        VideoWallSnapshotVo snapshot = TenantHelper.dynamic(TenantConstants.DEFAULT_TENANT_ID, () -> {
+            List<OfficerLocationVo> onlineOfficers = deviceMapper.selectList(new LambdaQueryWrapper<PatrolDevice>()
+                    .eq(PatrolDevice::getOnline, true)
+                    .isNotNull(PatrolDevice::getLatitude)
+                    .isNotNull(PatrolDevice::getLongitude)
+                    .orderByDesc(PatrolDevice::getLastHeartbeatTime))
+                .stream()
+                .filter(this::isDeviceOnline)
+                .map(this::toOfficerLocationVo)
+                .toList();
+
+            List<SosVo> activeSosEvents = sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
+                    .eq(PatrolSosEvent::getPhase, "ACTIVE")
+                    .isNotNull(PatrolSosEvent::getLatitude)
+                    .isNotNull(PatrolSosEvent::getLongitude)
+                    .orderByDesc(PatrolSosEvent::getCreateTime))
+                .stream()
+                .map(this::toSosVo)
+                .toList();
+
+            return new VideoWallSnapshotVo(
+                onlineOfficers,
+                activeSosEvents,
+                toPatrolAreaVo(currentArea()),
+                LocalDateTime.now().format(DATE_TIME_FORMATTER),
+                5
+            );
+        });
+        return R.ok(snapshot);
     }
 
     @GetMapping("/devices")
@@ -386,19 +436,7 @@ public class PatrolController {
                 .isNotNull(PatrolDevice::getLatitude)
                 .isNotNull(PatrolDevice::getLongitude)
                 .orderByDesc(PatrolDevice::getLastHeartbeatTime),
-            page, pageSize,
-            item -> new OfficerLocationVo(
-                badgeNo(item),
-                officerName(item),
-                deptName(item),
-                item.getDeviceId(),
-                BigDecimal.valueOf(item.getLatitude()),
-                BigDecimal.valueOf(item.getLongitude()),
-                blankToDefault(item.getAddress(), "未知位置"),
-                isDeviceOnline(item) ? "ONLINE" : "OFFLINE",
-                value(item.getBatteryPercent()),
-                formatDate(item.getLastHeartbeatTime())
-            )));
+            page, pageSize, this::toOfficerLocationVo));
     }
 
     @GetMapping("/map/officers/{badgeNo}/track")
@@ -425,8 +463,59 @@ public class PatrolController {
         return R.ok(toPatrolAreaVo(currentArea()));
     }
 
+    @GetMapping("/areas/owner-options")
+    public R<PatrolAreaOwnerOptionsVo> patrolAreaOwnerOptions() {
+        List<SysDeptVo> departments = sysDeptMapper.selectDeptList(new LambdaQueryWrapper<SysDept>()
+            .eq(SysDept::getStatus, "0")
+            .orderByAsc(SysDept::getOrderNum)
+            .orderByAsc(SysDept::getDeptId));
+        Map<Long, String> departmentNames = departments.stream()
+            .collect(java.util.stream.Collectors.toMap(SysDeptVo::getDeptId, SysDeptVo::getDeptName, (left, right) -> left));
+        List<PatrolAreaOrgOptionVo> organizations = departments.stream()
+            .map(dept -> new PatrolAreaOrgOptionVo(
+                String.valueOf(dept.getDeptId()),
+                dept.getParentId() == null ? "" : String.valueOf(dept.getParentId()),
+                blankToDefault(dept.getDeptName(), "未命名组织")
+            ))
+            .toList();
+        List<PatrolAreaUserOptionVo> users = sysUserMapper.selectUserList(new LambdaQueryWrapper<SysUser>()
+                .eq(SysUser::getStatus, "0")
+                .orderByAsc(SysUser::getNickName)
+                .orderByAsc(SysUser::getUserName))
+            .stream()
+            .map(user -> new PatrolAreaUserOptionVo(
+                String.valueOf(user.getUserId()),
+                blankToDefault(user.getUserName(), ""),
+                blankToDefault(user.getNickName(), user.getUserName()),
+                user.getDeptId() == null ? "" : String.valueOf(user.getDeptId()),
+                user.getDeptId() == null ? "" : blankToDefault(departmentNames.get(user.getDeptId()), "")
+            ))
+            .toList();
+        return R.ok(new PatrolAreaOwnerOptionsVo(organizations, users));
+    }
+
     @PostMapping("/areas")
     public R<PatrolAreaVo> savePatrolArea(@RequestBody PatrolAreaBo request) {
+        String ownerType = blankToDefault(request.ownerType(), "TEAM").trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("TEAM", "DEPT", "USER").contains(ownerType)) {
+            throw new ServiceException("辖区归属类型仅支持小组、部门或个人");
+        }
+        List<PatrolGeoPointVo> boundary = request.boundary() == null ? List.of() : request.boundary();
+        List<PatrolGeoPointVo> route = request.route() == null ? List.of() : request.route();
+        if (boundary.size() < 3 || boundary.stream().anyMatch(this::invalidGeoPoint)) {
+            throw new ServiceException("辖区边界至少需要 3 个有效经纬度点");
+        }
+        if ((!route.isEmpty() && route.size() < 2) || route.stream().anyMatch(this::invalidGeoPoint)) {
+            throw new ServiceException("巡逻路线为空或至少包含 2 个有效经纬度点");
+        }
+        if (("TEAM".equals(ownerType) || "DEPT".equals(ownerType)) && (request.teamId() == null || request.teamId().isBlank())) {
+            throw new ServiceException("请选择辖区归属的小组或部门");
+        }
+        if ("USER".equals(ownerType)
+            && (request.userId() == null || request.userId().isBlank())
+            && (request.badgeNo() == null || request.badgeNo().isBlank())) {
+            throw new ServiceException("请选择辖区归属人员");
+        }
         PatrolArea area = request.areaId() == null || request.areaId().isBlank()
             ? null
             : areaMapper.selectById(request.areaId());
@@ -438,13 +527,13 @@ public class PatrolController {
             area.setCreateTime(new Date());
         }
         area.setAreaName(blankToDefault(request.areaName(), "未命名执勤辖区"));
-        area.setTeamId(blankToDefault(request.teamId(), "DEFAULT"));
-        area.setTeamName(blankToDefault(request.teamName(), "默认执勤组"));
-        area.setOwnerType(blankToDefault(request.ownerType(), "TEAM"));
-        area.setUserId(parseLongOrNull(request.userId()));
-        area.setBadgeNo(blankToDefault(request.badgeNo(), ""));
-        area.setBoundaryJson(JsonUtils.toJsonString(request.boundary() == null ? List.of() : request.boundary()));
-        area.setRouteJson(JsonUtils.toJsonString(request.route() == null ? List.of() : request.route()));
+        area.setTeamId("USER".equals(ownerType) ? "" : blankToDefault(request.teamId(), ""));
+        area.setTeamName("USER".equals(ownerType) ? "" : blankToDefault(request.teamName(), ""));
+        area.setOwnerType(ownerType);
+        area.setUserId("USER".equals(ownerType) ? parseLongOrNull(request.userId()) : null);
+        area.setBadgeNo("USER".equals(ownerType) ? blankToDefault(request.badgeNo(), "") : "");
+        area.setBoundaryJson(JsonUtils.toJsonString(boundary));
+        area.setRouteJson(JsonUtils.toJsonString(route));
         area.setUpdateTime(new Date());
         areaMapper.insertOrUpdate(area);
         logAudit("AREA", "保存执勤辖区", area.getAreaId(), "SUCCESS");
@@ -1359,6 +1448,22 @@ public class PatrolController {
         );
     }
 
+    private OfficerLocationVo toOfficerLocationVo(PatrolDevice device) {
+        return new OfficerLocationVo(
+            badgeNo(device),
+            officerName(device),
+            deptName(device),
+            device.getDeviceId(),
+            blankToDefault(device.getDeviceType(), "HEADSET"),
+            BigDecimal.valueOf(device.getLatitude()),
+            BigDecimal.valueOf(device.getLongitude()),
+            blankToDefault(device.getAddress(), "未知位置"),
+            isDeviceOnline(device) ? "ONLINE" : "OFFLINE",
+            value(device.getBatteryPercent()),
+            formatDate(device.getLastHeartbeatTime())
+        );
+    }
+
     private DeviceConfigVo toDeviceConfigVo(PatrolDevice device) {
         DeviceCapabilitiesDto capabilities = patrolAppService.deviceCapabilities(device.getDeviceId());
         DeviceWifiStateDto wifi = patrolAppService.deviceWifi(device.getDeviceId());
@@ -1633,6 +1738,16 @@ public class PatrolController {
         }
         List<PatrolGeoPointVo> points = JsonUtils.parseArray(json, PatrolGeoPointVo.class);
         return points == null ? List.of() : points;
+    }
+
+    private boolean invalidGeoPoint(PatrolGeoPointVo point) {
+        return point == null
+            || point.latitude() == null
+            || point.longitude() == null
+            || point.latitude() < -90
+            || point.latitude() > 90
+            || point.longitude() < -180
+            || point.longitude() > 180;
     }
 
     private Long parseLongOrNull(String value) {
@@ -2358,7 +2473,10 @@ public class PatrolController {
     public record DispatchChannelVo(String channelId, String deviceId, String officerName, String deptName, String state, String mode, Integer latencyMs, String locationText, Boolean talking) {
     }
 
-    public record OfficerLocationVo(String badgeNo, String officerName, String deptName, String deviceId, BigDecimal latitude, BigDecimal longitude, String address, String onlineStatus, Integer batteryPercent, String reportedAt) {
+    public record OfficerLocationVo(String badgeNo, String officerName, String deptName, String deviceId, String deviceType, BigDecimal latitude, BigDecimal longitude, String address, String onlineStatus, Integer batteryPercent, String reportedAt) {
+    }
+
+    public record VideoWallSnapshotVo(List<OfficerLocationVo> officers, List<SosVo> sosEvents, PatrolAreaVo patrolArea, String generatedAt, Integer refreshAfterSeconds) {
     }
 
     public record TrackPointVo(String badgeNo, BigDecimal latitude, BigDecimal longitude, String address, String reportedAt) {
@@ -2371,6 +2489,15 @@ public class PatrolController {
     }
 
     public record PatrolAreaBo(String areaId, String areaName, String teamId, String teamName, String ownerType, String userId, String badgeNo, List<PatrolGeoPointVo> boundary, List<PatrolGeoPointVo> route) {
+    }
+
+    public record PatrolAreaOwnerOptionsVo(List<PatrolAreaOrgOptionVo> organizations, List<PatrolAreaUserOptionVo> users) {
+    }
+
+    public record PatrolAreaOrgOptionVo(String id, String parentId, String name) {
+    }
+
+    public record PatrolAreaUserOptionVo(String userId, String userName, String displayName, String departmentId, String departmentName) {
     }
 
     public record AlertVo(String alertId, String alertType, String title, String targetName, String deviceId, String officerName, String locationText, String status, String level, String confidence, String occurredAt) {

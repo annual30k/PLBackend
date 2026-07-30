@@ -1266,7 +1266,34 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 .eq(PatrolArea::getOwnerType, "TEAM")
                 .eq(PatrolArea::getTeamId, String.valueOf(deptId)));
         }
+        if (area == null && deptId != null) {
+            for (String departmentId : departmentHierarchyIds(deptId)) {
+                area = firstArea(new LambdaQueryWrapper<PatrolArea>()
+                    .eq(PatrolArea::getOwnerType, "DEPT")
+                    .eq(PatrolArea::getTeamId, departmentId));
+                if (area != null) {
+                    break;
+                }
+            }
+        }
         return area;
+    }
+
+    private List<String> departmentHierarchyIds(Long deptId) {
+        List<String> departmentIds = new ArrayList<>();
+        departmentIds.add(String.valueOf(deptId));
+        SysDeptVo department = deptService.selectDeptById(deptId);
+        if (department == null || department.getAncestors() == null || department.getAncestors().isBlank()) {
+            return departmentIds;
+        }
+        String[] ancestors = department.getAncestors().split(",");
+        for (int index = ancestors.length - 1; index >= 0; index--) {
+            String ancestor = ancestors[index].trim();
+            if (!ancestor.isBlank() && !"0".equals(ancestor) && !departmentIds.contains(ancestor)) {
+                departmentIds.add(ancestor);
+            }
+        }
+        return departmentIds;
     }
 
     private PatrolArea firstArea(LambdaQueryWrapper<PatrolArea> wrapper) {

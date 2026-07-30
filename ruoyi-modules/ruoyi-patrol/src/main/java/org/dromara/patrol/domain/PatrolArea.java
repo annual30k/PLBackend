@@ -42,7 +42,7 @@ public class PatrolArea extends TenantEntity {
     private String teamName;
 
     /**
-     * 归属类型（USER 个人 / TEAM 小组）
+     * 归属类型（USER 个人 / TEAM 小组 / DEPT 部门）
      */
     private String ownerType;
 

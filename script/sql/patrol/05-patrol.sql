@@ -204,7 +204,7 @@ create table if not exists patrol_area (
     area_name     varchar(120)  not null comment '巡区名称',
     team_id       varchar(64)   default null comment '队伍ID',
     team_name     varchar(120)  default null comment '队伍名称',
-    owner_type    varchar(16)   default 'TEAM' comment '归属类型 USER个人 TEAM小组',
+    owner_type    varchar(16)   default 'TEAM' comment '归属类型 USER个人 TEAM小组 DEPT部门',
     user_id       bigint(20)    default null comment '个人归属用户ID',
     badge_no      varchar(64)   default null comment '个人归属警号',
     boundary_json text          comment '边界点JSON',

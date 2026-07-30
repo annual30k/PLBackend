@@ -172,7 +172,7 @@ create table patrol_area (
     area_name     varchar(120)  not null,
     team_id       varchar(64),
     team_name     varchar(120),
-    owner_type    varchar(16) default 'TEAM',
+    owner_type    varchar(16) default 'TEAM', -- USER个人 TEAM小组 DEPT部门
     user_id       bigint,
     badge_no      varchar(64),
     boundary_json clob,
