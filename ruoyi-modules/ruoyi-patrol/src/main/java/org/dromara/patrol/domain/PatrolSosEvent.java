@@ -8,6 +8,7 @@ import lombok.EqualsAndHashCode;
 import org.dromara.common.tenant.core.TenantEntity;
 
 import java.io.Serial;
+import java.util.Date;
 
 /**
  * 巡检紧急求助事件对象 patrol_sos_event
@@ -75,6 +76,41 @@ public class PatrolSosEvent extends TenantEntity {
      * 增援预计到达时间（分钟）
      */
     private Integer backupEtaMinutes;
+
+    /**
+     * 已指派增援警员
+     */
+    private String assignedOfficerName;
+
+    /**
+     * 已指派增援警号
+     */
+    private String assignedBadgeNo;
+
+    /**
+     * 已指派增援设备
+     */
+    private String assignedDeviceId;
+
+    /**
+     * 指挥台接警时间
+     */
+    private Date receivedAt;
+
+    /**
+     * 处置完成时间
+     */
+    private Date resolvedAt;
+
+    /**
+     * 处置结果
+     */
+    private String resolutionResult;
+
+    /**
+     * 处置说明
+     */
+    private String resolutionNote;
 
     /**
      * 删除标志（0代表存在 1代表删除）

@@ -109,6 +109,7 @@ import org.dromara.patrol.mapper.PatrolMessageMapper;
 import org.dromara.patrol.mapper.PatrolMessageReceiptMapper;
 import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.dromara.patrol.service.IPatrolAppService;
+import org.dromara.patrol.service.FirmwareRolloutPolicy;
 import org.dromara.patrol.service.OssAccessUrlResolver;
 import org.dromara.patrol.service.PatrolRealtimePublisher;
 import org.dromara.system.domain.SysUser;
@@ -140,6 +141,7 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -977,9 +979,10 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     @Transactional(rollbackFor = Exception.class)
     public Boolean verifyMedia(String fileId) {
         Long userId = currentAppUserId();
+        Long ownerScope = isCommandAdministrator(userId) ? null : userId;
         return TenantHelper.dynamic(TENANT_ID, () -> {
             List<PatrolMedia> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>()
-                .eq(PatrolMedia::getCreateBy, userId)
+                .eq(ownerScope != null, PatrolMedia::getCreateBy, ownerScope)
                 .eq(PatrolMedia::getFileId, fileId));
             files.forEach(file -> {
                 boolean currentVerified = verifyStoredMedia(file);
@@ -1344,7 +1347,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             }
             PatrolSosEvent active = sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
                     .eq(PatrolSosEvent::getUserId, loginUser.getUserId())
-                    .eq(PatrolSosEvent::getPhase, "ACTIVE")
+                    .in(PatrolSosEvent::getPhase, List.of("ACTIVE", "RECEIVED", "BACKUP_ENROUTE"))
                     .orderByDesc(PatrolSosEvent::getCreateTime))
                 .stream()
                 .findFirst()
@@ -1382,7 +1385,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             PatrolSosEvent event = sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
                     .eq(PatrolSosEvent::getUserId, LoginHelper.getUserId())
-                    .eq(PatrolSosEvent::getPhase, "ACTIVE")
+                    .in(PatrolSosEvent::getPhase, List.of("ACTIVE", "RECEIVED", "BACKUP_ENROUTE"))
                     .orderByDesc(PatrolSosEvent::getCreateTime))
                 .stream()
                 .findFirst()
@@ -1424,14 +1427,19 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public FirmwareCheckDto checkFirmware(String deviceId, FirmwareCheckRequestDto request) {
         return TenantHelper.dynamic(TENANT_ID, () -> {
             PatrolDevice device = deviceMapper.selectById(deviceId);
+            if (device == null) {
+                throw new ServiceException("设备不存在，无法检查固件版本");
+            }
             String currentVersion = blankToDefault(
                 request == null ? null : request.getCurrentFirmwareVersion(),
-                device == null ? "" : blankToDefault(device.getFirmwareVersion(), "")
+                blankToDefault(device.getFirmwareVersion(), "")
             );
-            String deviceType = normalizeMatchValue(request == null ? null : request.getDeviceType(), device == null ? "" : device.getDeviceType());
+            reconcileFirmwareUpgradeTasks(device, currentVersion);
+            String deviceType = normalizeMatchValue(request == null ? null : request.getDeviceType(), device.getDeviceType());
             String vendor = normalizeMatchValue(request == null ? null : request.getVendor(), "");
             String chipset = normalizeMatchValue(request == null ? null : request.getChipset(), "");
             String deviceModel = normalizeMatchValue(request == null ? null : request.getDeviceModel(), "");
@@ -1446,6 +1454,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 .filter(item -> matchesFirmware(item.getDeviceModel(), deviceModel))
                 .filter(item -> matchesFirmware(item.getHardwareVersion(), hardwareVersion))
                 .filter(item -> matchesFirmwareVersionRange(item, currentVersion))
+                .filter(item -> FirmwareRolloutPolicy.matches(item.getGrayScope(), item.getGrayTargets(), deviceId))
                 .sorted(Comparator.comparing((PatrolFirmwareVersion item) -> value(item.getVersionCode(), 0)).reversed()
                     .thenComparing(PatrolFirmwareVersion::getPublishedAt, Comparator.nullsLast(Comparator.reverseOrder())))
                 .toList();
@@ -1465,14 +1474,41 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             if (request == null || request.getFirmwareId() == null || request.getFirmwareId().isBlank()) {
                 throw new ServiceException("固件ID不能为空");
             }
+            PatrolDevice device = deviceMapper.selectById(deviceId);
+            if (device == null) {
+                throw new ServiceException("设备不存在，无法创建固件升级任务");
+            }
             PatrolFirmwareVersion firmware = firmwareVersionMapper.selectById(request.getFirmwareId());
             if (firmware == null) {
                 throw new ServiceException("固件版本不存在");
             }
+            if (!"PUBLISHED".equalsIgnoreCase(blankToDefault(firmware.getStatus(), ""))) {
+                throw new ServiceException("固件版本未发布，不能创建升级任务");
+            }
+            if (!matchesFirmware(firmware.getDeviceType(), device.getDeviceType())) {
+                throw new ServiceException("固件包与当前设备类型不匹配");
+            }
+            if (!FirmwareRolloutPolicy.matches(firmware.getGrayScope(), firmware.getGrayTargets(), deviceId)) {
+                throw new ServiceException("当前设备不在该固件版本的发布范围内");
+            }
             String fromVersion = blankToDefault(request.getFromVersion(), "");
             if (fromVersion.isBlank()) {
-                PatrolDevice device = deviceMapper.selectById(deviceId);
-                fromVersion = device == null ? "" : blankToDefault(device.getFirmwareVersion(), "");
+                fromVersion = blankToDefault(device.getFirmwareVersion(), "");
+            }
+            if (!matchesFirmwareVersionRange(firmware, fromVersion)) {
+                throw new ServiceException("当前固件版本不在该升级包允许范围内");
+            }
+            PatrolFirmwareUpgradeTask activeTask = firmwareUpgradeTaskMapper.selectOne(new LambdaQueryWrapper<PatrolFirmwareUpgradeTask>()
+                .eq(PatrolFirmwareUpgradeTask::getDeviceId, deviceId)
+                .eq(PatrolFirmwareUpgradeTask::getFirmwareId, firmware.getFirmwareId())
+                .notIn(PatrolFirmwareUpgradeTask::getStatus, List.of("SUCCESS", "FAILED", "CANCELLED"))
+                .orderByDesc(PatrolFirmwareUpgradeTask::getStartedAt)
+                .last("limit 1"));
+            if (activeTask != null) {
+                return toFirmwareUpgradeTaskDto(activeTask);
+            }
+            if (!fromVersion.isBlank() && fromVersion.equalsIgnoreCase(blankToDefault(firmware.getVersionName(), ""))) {
+                throw new ServiceException("设备已是目标固件版本，无需重复升级");
             }
             PatrolFirmwareUpgradeTask task = new PatrolFirmwareUpgradeTask();
             task.setTaskId("FUT-" + IdUtil.fastSimpleUUID());
@@ -1505,11 +1541,30 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             if (task == null) {
                 throw new ServiceException("固件升级任务不存在");
             }
-            String status = blankToDefault(request.getStatus(), task.getStatus());
+            String currentStatus = normalizeFirmwareUpgradeStatus(task.getStatus());
+            String status = normalizeFirmwareUpgradeStatus(blankToDefault(request.getStatus(), currentStatus));
+            if (isTerminalFirmwareUpgradeStatus(currentStatus)) {
+                if (!currentStatus.equals(status)) {
+                    throw new ServiceException("固件升级任务已结束，不能改写终态");
+                }
+                return toFirmwareUpgradeTaskDto(task);
+            }
+            if (firmwareUpgradePhase(status) < firmwareUpgradePhase(currentStatus)) {
+                return toFirmwareUpgradeTaskDto(task);
+            }
+            float requestedProgress = request.getProgress() == null ? value(task.getProgress(), 0F) : request.getProgress();
+            if (requestedProgress < 0F || requestedProgress > 1F) {
+                throw new ServiceException("固件升级进度必须在 0 到 1 之间");
+            }
             task.setStatus(status);
-            task.setProgress(value(request.getProgress(), value(task.getProgress(), 0F)));
-            task.setErrorCode(blankToDefault(request.getErrorCode(), task.getErrorCode()));
-            task.setErrorMessage(blankToDefault(request.getErrorMessage(), task.getErrorMessage()));
+            task.setProgress("SUCCESS".equals(status) ? 1F : Math.max(value(task.getProgress(), 0F), requestedProgress));
+            if ("SUCCESS".equals(status)) {
+                task.setErrorCode("");
+                task.setErrorMessage("");
+            } else {
+                task.setErrorCode(blankToDefault(request.getErrorCode(), task.getErrorCode()));
+                task.setErrorMessage(blankToDefault(request.getErrorMessage(), task.getErrorMessage()));
+            }
             if ("SUCCESS".equals(status) || "FAILED".equals(status) || "CANCELLED".equals(status)) {
                 task.setFinishedAt(new Date());
             }
@@ -1526,6 +1581,77 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
                 realtimePublisher.payload("taskId", taskId, "deviceId", task.getDeviceId(), "status", task.getStatus(), "progress", task.getProgress(), "errorCode", task.getErrorCode()));
             return toFirmwareUpgradeTaskDto(task);
         });
+    }
+
+    private String normalizeFirmwareUpgradeStatus(String status) {
+        String normalized = blankToDefault(status, "PENDING").trim().toUpperCase(Locale.ROOT);
+        if (normalized.contains("COMPLETED") || "SUCCESS".equals(normalized)) {
+            return "SUCCESS";
+        }
+        if (normalized.contains("FAILED") || normalized.contains("ERROR")) {
+            return "FAILED";
+        }
+        if (normalized.contains("CANCELLED")) {
+            return "CANCELLED";
+        }
+        if (normalized.contains("DOWNLOADING")) {
+            return "DOWNLOADING";
+        }
+        if (normalized.contains("PREPARING") || normalized.contains("READY")) {
+            return "PREPARING";
+        }
+        if (normalized.contains("STARTED") || normalized.contains("PROGRESS") || normalized.contains("INSTALLING")
+            || normalized.contains("HANDOFF") || normalized.contains("RECONNECT")) {
+            return "INSTALLING";
+        }
+        if ("PENDING".equals(normalized)) {
+            return "PENDING";
+        }
+        throw new ServiceException("不支持的固件升级状态：" + normalized);
+    }
+
+    private boolean isTerminalFirmwareUpgradeStatus(String status) {
+        return Set.of("SUCCESS", "FAILED", "CANCELLED").contains(status);
+    }
+
+    private int firmwareUpgradePhase(String status) {
+        return switch (status) {
+            case "PENDING" -> 0;
+            case "DOWNLOADING" -> 1;
+            case "PREPARING" -> 2;
+            case "INSTALLING" -> 3;
+            case "SUCCESS", "FAILED", "CANCELLED" -> 4;
+            default -> throw new ServiceException("不支持的固件升级状态：" + status);
+        };
+    }
+
+    private void reconcileFirmwareUpgradeTasks(PatrolDevice device, String currentVersion) {
+        if (currentVersion == null || currentVersion.isBlank()) {
+            return;
+        }
+        List<PatrolFirmwareUpgradeTask> tasks = firmwareUpgradeTaskMapper.selectList(new LambdaQueryWrapper<PatrolFirmwareUpgradeTask>()
+            .eq(PatrolFirmwareUpgradeTask::getDeviceId, device.getDeviceId())
+            .eq(PatrolFirmwareUpgradeTask::getToVersion, currentVersion)
+            .notIn(PatrolFirmwareUpgradeTask::getStatus, List.of("SUCCESS", "FAILED", "CANCELLED")));
+        if (tasks.isEmpty()) {
+            return;
+        }
+        Date finishedAt = new Date();
+        for (PatrolFirmwareUpgradeTask task : tasks) {
+            task.setStatus("SUCCESS");
+            task.setProgress(1F);
+            task.setErrorCode("");
+            task.setErrorMessage("");
+            task.setFinishedAt(finishedAt);
+            firmwareUpgradeTaskMapper.updateById(task);
+            saveAudit("FIRMWARE", "设备版本回报确认固件升级成功", task.getTaskId(), "SUCCESS");
+            realtimePublisher.publish("FIRMWARE_UPGRADE_UPDATED", "devices", "设备固件升级已由版本回报确认", device.getDeviceId(), task.getTaskId(),
+                realtimePublisher.payload("taskId", task.getTaskId(), "deviceId", device.getDeviceId(), "status", "SUCCESS", "progress", 1F));
+        }
+        if (!currentVersion.equalsIgnoreCase(blankToDefault(device.getFirmwareVersion(), ""))) {
+            device.setFirmwareVersion(currentVersion);
+            deviceMapper.updateById(device);
+        }
     }
 
     @Override
@@ -1594,6 +1720,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             alert.setOccurredAt(blankToDefault(request.getOccurredAt(), Date.from(Instant.now()).toString()));
             alert.setLocationText(blankToDefault(request.getCameraId(), "边缘小脑实时流"));
             alert.setSource(deviceId);
+            applyAlertLocationFromDevice(alert, deviceId);
             alert.setConfidence(confidence);
             alert.setDescription("边缘小脑多帧确认候选，人员=" + displayName
                 + "，编号=" + personId
@@ -1684,6 +1811,7 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             alert.setOccurredAt(blankToDefault(request.getOccurredAt(), Date.from(Instant.now()).toString()));
             alert.setLocationText(blankToDefault(request.getCameraId(), "云端识别任务"));
             alert.setSource(deviceId);
+            applyAlertLocationFromDevice(alert, deviceId);
             alert.setConfidence(confidence);
             alert.setDescription("云端车牌识别命中有效车辆布控，车牌=" + plateNo
                 + "，布控编号=" + controlled.getControlId()
@@ -1910,6 +2038,18 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
         return alert;
     }
 
+    private void applyAlertLocationFromDevice(PatrolAlert alert, String deviceId) {
+        PatrolDevice device = deviceId == null || deviceId.isBlank() ? null : deviceMapper.selectById(deviceId);
+        if (device == null) {
+            return;
+        }
+        alert.setLatitude(device.getLatitude());
+        alert.setLongitude(device.getLongitude());
+        if ((alert.getLocationText() == null || alert.getLocationText().isBlank()) && device.getAddress() != null) {
+            alert.setLocationText(device.getAddress());
+        }
+    }
+
     /**
      * 云端发件箱可能在平台已落库但响应丢失时重放，同一来源和告警编号必须幂等返回。
      */
@@ -2026,6 +2166,14 @@ public class PatrolAppServiceImpl implements IPatrolAppService {
             throw new ServiceException("用户未登录");
         }
         return userId;
+    }
+
+    private boolean isCommandAdministrator(Long userId) {
+        try {
+            return LoginHelper.isSuperAdmin(userId) || StpUtil.hasRole(TenantConstants.TENANT_ADMIN_ROLE_KEY);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private void cacheDevice(PatrolDevice device) {

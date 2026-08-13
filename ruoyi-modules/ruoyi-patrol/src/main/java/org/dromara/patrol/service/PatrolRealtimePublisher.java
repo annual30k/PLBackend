@@ -3,6 +3,7 @@ package org.dromara.patrol.service;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.sse.utils.SseMessageUtils;
+import org.dromara.common.websocket.utils.WebSocketUtils;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -41,7 +42,9 @@ public class PatrolRealtimePublisher {
             event.put("resourceId", resourceId);
             event.put("payload", payload == null ? Map.of() : payload);
             event.put("occurredAt", Instant.now().toString());
-            SseMessageUtils.publishAll(JsonUtils.toJsonString(event));
+            String message = JsonUtils.toJsonString(event);
+            SseMessageUtils.publishAll(message);
+            WebSocketUtils.publishAll(message);
         } catch (Exception e) {
             log.warn("巡检实时事件推送失败 type={} resourceId={}", type, resourceId, e);
         }

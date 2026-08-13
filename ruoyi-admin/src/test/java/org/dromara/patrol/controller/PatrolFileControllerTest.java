@@ -17,4 +17,11 @@ class PatrolFileControllerTest {
 
         assertThat(PatrolFileController.shouldServeClasspathSample(media)).isTrue();
     }
+
+    @Tag("dev")
+    @Test
+    void commandAdminCanDownloadTenantMediaWhileDeviceUsersStayOwnerScoped() {
+        assertThat(PatrolFileController.downloadOwnerScope(1L, true)).isNull();
+        assertThat(PatrolFileController.downloadOwnerScope(9527L, false)).isEqualTo(9527L);
+    }
 }

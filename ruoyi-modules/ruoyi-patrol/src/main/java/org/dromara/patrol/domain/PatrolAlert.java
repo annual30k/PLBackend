@@ -52,6 +52,16 @@ public class PatrolAlert extends TenantEntity {
     private String locationText;
 
     /**
+     * 预警发生纬度
+     */
+    private Double latitude;
+
+    /**
+     * 预警发生经度
+     */
+    private Double longitude;
+
+    /**
      * 告警来源
      */
     private String source;
@@ -80,6 +90,21 @@ public class PatrolAlert extends TenantEntity {
      * 操作人ID
      */
     private String operatorId;
+
+    /**
+     * 当前指派警员
+     */
+    private String assignedOfficerName;
+
+    /**
+     * 当前指派警号
+     */
+    private String assignedBadgeNo;
+
+    /**
+     * 当前指派设备
+     */
+    private String assignedDeviceId;
 
     /**
      * 删除标志（0代表存在 1代表删除）

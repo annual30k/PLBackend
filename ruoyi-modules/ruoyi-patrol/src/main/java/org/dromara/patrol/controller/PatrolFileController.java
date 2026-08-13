@@ -7,6 +7,7 @@ import cn.dev33.satoken.stp.StpUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import org.dromara.common.core.constant.TenantConstants;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.satoken.utils.LoginHelper;
@@ -110,7 +111,7 @@ public class PatrolFileController {
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
             return;
         }
-        PatrolMedia media = findMedia(fileId, currentUserIdOrNull());
+        PatrolMedia media = findMedia(fileId, currentDownloadOwnerIdOrNull());
         if (media == null) {
             response.sendError(HttpServletResponse.SC_NOT_FOUND, "媒体证据不存在");
             return;
@@ -197,6 +198,20 @@ public class PatrolFileController {
         } catch (Exception ignored) {
             return null;
         }
+    }
+
+    private Long currentDownloadOwnerIdOrNull() {
+        Long userId = currentUserIdOrNull();
+        if (userId == null) {
+            return null;
+        }
+        boolean commandAdmin = LoginHelper.isSuperAdmin(userId)
+            || StpUtil.hasRole(TenantConstants.TENANT_ADMIN_ROLE_KEY);
+        return downloadOwnerScope(userId, commandAdmin);
+    }
+
+    static Long downloadOwnerScope(Long userId, boolean commandAdmin) {
+        return commandAdmin ? null : userId;
     }
 
     private MediaFileDto toMediaDto(PatrolMedia media) {

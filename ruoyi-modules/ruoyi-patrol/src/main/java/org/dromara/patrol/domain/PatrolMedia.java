@@ -147,6 +147,11 @@ public class PatrolMedia extends TenantEntity {
     private String evidenceSource;
 
     /**
+     * 文件业务元数据（例如 APK 包名与版本信息）
+     */
+    private String metadataJson;
+
+    /**
      * 删除标志（0代表存在 1代表删除）
      */
     @TableLogic

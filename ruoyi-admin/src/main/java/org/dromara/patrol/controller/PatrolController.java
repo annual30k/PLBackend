@@ -6,6 +6,8 @@ import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import net.dongliu.apk.parser.ApkFile;
+import net.dongliu.apk.parser.bean.ApkMeta;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.DataFormatter;
 import org.apache.poi.ss.usermodel.Row;
@@ -76,6 +78,7 @@ import org.dromara.patrol.mapper.PatrolMessageReceiptMapper;
 import org.dromara.patrol.mapper.PatrolSosDispositionMapper;
 import org.dromara.patrol.mapper.PatrolSosEventMapper;
 import org.dromara.patrol.service.IPatrolAppService;
+import org.dromara.patrol.service.FirmwareRolloutPolicy;
 import org.dromara.patrol.service.PatrolRealtimePublisher;
 import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.system.domain.SysDept;
@@ -92,6 +95,7 @@ import org.redisson.spring.data.connection.RedissonConnectionFactory;
 import org.springframework.http.MediaType;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.RedisConnectionUtils;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -105,6 +109,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.math.BigDecimal;
@@ -112,6 +117,9 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -132,6 +140,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 import javax.sql.DataSource;
 
 /**
@@ -150,6 +160,15 @@ public class PatrolController {
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final long DEVICE_HEARTBEAT_TIMEOUT_MILLIS = 45_000L;
     private static final Set<String> SUPPORTED_DEVICE_COMMANDS = Set.of("TAKE_PHOTO", "START_RECORD", "STOP_RECORD");
+    private static final Set<String> SUPPORTED_ALERT_CLOSE_RESULTS = Set.of(
+        "QUESTIONED", "TAKEN_AWAY", "FALSE_ALARM", "RESOLVED", "REQUEST_BACKUP"
+    );
+    private static final Set<String> OPEN_SOS_PHASES = Set.of("ACTIVE", "RECEIVED", "BACKUP_ENROUTE");
+    private static final Set<String> SUPPORTED_SOS_RESOLUTION_RESULTS = Set.of("RESOLVED", "CANCELLED");
+    private static final Set<String> SUPPORTED_RELEASE_STATUSES = Set.of("PUBLISHED", "DISABLED");
+    private static final Set<String> SUPPORTED_CONTROL_STATUSES = Set.of("ENABLED", "DISABLED");
+    private static final Set<String> SUPPORTED_RISK_LEVELS = Set.of("HIGH", "MEDIUM", "LOW");
+    private static final String PATROL_LINK_ANDROID_PACKAGE = "com.patrollink";
     private static final Map<String, Set<String>> DAILY_REPORT_STATUS_TRANSITIONS = Map.of(
         "PENDING_REVIEW", Set.of("REVIEWED"),
         "REVIEWED", Set.of("ARCHIVED"),
@@ -197,14 +216,14 @@ public class PatrolController {
         List<PatrolSosEvent> sosEvents = sosEventMapper.selectList();
         long onlineDevices = devices.stream().filter(this::isDeviceOnline).count();
         long pendingAlerts = alerts.stream().filter(item -> !"CLOSED".equals(item.getStatus())).count();
-        long activeSos = sosEvents.stream().filter(item -> "ACTIVE".equals(item.getPhase())).count();
+        long activeSos = sosEvents.stream().filter(item -> isOpenSosPhase(item.getPhase())).count();
         return R.ok(new DashboardSummaryVo(
             List.of(
                 new MetricVo("在线警员", String.valueOf(onlineDevices), "按在线设备折算", "success"),
                 new MetricVo("在线设备", String.valueOf(onlineDevices), devices.size() + " 台设备入库", "primary"),
                 new MetricVo("视频会话", "预留", "SDK 暂未提供实时流能力", "warning"),
                 new MetricVo("未处置预警", String.valueOf(pendingAlerts), "PENDING/HANDLING", pendingAlerts > 0 ? "danger" : "success"),
-                new MetricVo("SOS 求助", String.valueOf(activeSos), "ACTIVE 状态", activeSos > 0 ? "danger" : "success"),
+                new MetricVo("SOS 求助", String.valueOf(activeSos), "待接警/处置中/增援中", activeSos > 0 ? "danger" : "success"),
                 new MetricVo("媒体证据", String.valueOf(media.size()), "MinIO/设备侧记录", "info")
             ),
             workItems(alerts, sosEvents, devices),
@@ -232,7 +251,7 @@ public class PatrolController {
                 .toList();
 
             List<SosVo> activeSosEvents = sosEventMapper.selectList(new LambdaQueryWrapper<PatrolSosEvent>()
-                    .eq(PatrolSosEvent::getPhase, "ACTIVE")
+                    .in(PatrolSosEvent::getPhase, OPEN_SOS_PHASES)
                     .isNotNull(PatrolSosEvent::getLatitude)
                     .isNotNull(PatrolSosEvent::getLongitude)
                     .orderByDesc(PatrolSosEvent::getCreateTime))
@@ -269,26 +288,40 @@ public class PatrolController {
 
     @GetMapping("/devices/{deviceId}/config")
     public R<DeviceConfigVo> deviceConfig(@PathVariable String deviceId) {
-        PatrolDevice device = deviceMapper.selectById(deviceId);
-        return R.ok(toDeviceConfigVo(device == null ? fallbackDevice(deviceId) : device));
+        return R.ok(toDeviceConfigVo(requireDevice(deviceId)));
     }
 
     @PostMapping("/devices/{deviceId}/wifi")
     public R<DeviceConfigVo> configureDeviceWifi(@PathVariable String deviceId, @RequestBody DeviceWifiStateDto request) {
+        requireDevice(deviceId);
+        if (request == null) {
+            throw new ServiceException("Wi-Fi 配置不能为空");
+        }
+        String ssid = blankToDefault(request.getSsid(), "").trim();
+        if (request.isEnabled() && ssid.isBlank()) {
+            throw new ServiceException("启用 Wi-Fi 时必须填写 SSID");
+        }
+        if (ssid.length() > 64) {
+            throw new ServiceException("Wi-Fi SSID 不能超过 64 个字符");
+        }
+        request.setSsid(ssid);
         patrolAppService.configureWifi(deviceId, request);
         logAudit("DEVICE", "后台配置设备Wi-Fi", deviceId, "SUCCESS");
-        return R.ok(toDeviceConfigVo(deviceOrFallback(deviceId)));
+        return R.ok(toDeviceConfigVo(requireDevice(deviceId)));
     }
 
     @PostMapping("/devices/{deviceId}/settings")
     public R<DeviceConfigVo> applyDeviceSettings(@PathVariable String deviceId, @RequestBody DeviceAdvancedSettingsDto request) {
+        requireDevice(deviceId);
+        validateDeviceSettings(request);
         patrolAppService.applySettings(deviceId, request);
         logAudit("DEVICE", "后台配置设备高级参数", deviceId, "SUCCESS");
-        return R.ok(toDeviceConfigVo(deviceOrFallback(deviceId)));
+        return R.ok(toDeviceConfigVo(requireDevice(deviceId)));
     }
 
     @PostMapping("/devices/{deviceId}/realtime-audio/start")
     public R<DeviceControlResultDto> startDeviceRealtimeAudio(@PathVariable String deviceId) {
+        requireDevice(deviceId);
         DeviceControlResultDto result = patrolAppService.startRealtimeAudioSync(deviceId);
         logAudit("DEVICE", "请求开启硬件实时音频", deviceId, result.isSuccess() ? "SUCCESS" : "UNSUPPORTED");
         return R.ok(result);
@@ -296,6 +329,7 @@ public class PatrolController {
 
     @PostMapping("/devices/{deviceId}/realtime-audio/stop")
     public R<DeviceControlResultDto> stopDeviceRealtimeAudio(@PathVariable String deviceId) {
+        requireDevice(deviceId);
         DeviceControlResultDto result = patrolAppService.stopRealtimeAudioSync(deviceId);
         logAudit("DEVICE", "请求停止硬件实时音频", deviceId, result.isSuccess() ? "SUCCESS" : "UNSUPPORTED");
         return R.ok(result);
@@ -303,6 +337,7 @@ public class PatrolController {
 
     @PostMapping("/devices/{deviceId}/media-sync/completed")
     public R<DeviceControlResultDto> markDeviceMediaSyncCompleted(@PathVariable String deviceId) {
+        requireDevice(deviceId);
         DeviceControlResultDto result = patrolAppService.notifyMediaSyncCompleted(deviceId);
         logAudit("DEVICE", "后台标记媒体同步完成", deviceId, result.isSuccess() ? "SUCCESS" : "FAILED");
         return R.ok(result);
@@ -496,6 +531,16 @@ public class PatrolController {
 
     @PostMapping("/areas")
     public R<PatrolAreaVo> savePatrolArea(@RequestBody PatrolAreaBo request) {
+        if (request == null) {
+            throw new ServiceException("辖区配置不能为空");
+        }
+        String areaName = blankToDefault(request.areaName(), "").trim();
+        if (areaName.isBlank()) {
+            throw new ServiceException("辖区名称不能为空");
+        }
+        if (areaName.length() > 100) {
+            throw new ServiceException("辖区名称不能超过 100 个字符");
+        }
         String ownerType = blankToDefault(request.ownerType(), "TEAM").trim().toUpperCase(Locale.ROOT);
         if (!Set.of("TEAM", "DEPT", "USER").contains(ownerType)) {
             throw new ServiceException("辖区归属类型仅支持小组、部门或个人");
@@ -516,17 +561,33 @@ public class PatrolController {
             && (request.badgeNo() == null || request.badgeNo().isBlank())) {
             throw new ServiceException("请选择辖区归属人员");
         }
-        PatrolArea area = request.areaId() == null || request.areaId().isBlank()
-            ? null
-            : areaMapper.selectById(request.areaId());
-        if (area == null) {
+        if ("TEAM".equals(ownerType) || "DEPT".equals(ownerType)) {
+            Long deptId = parseLongOrNull(request.teamId());
+            SysDept department = deptId == null ? null : sysDeptMapper.selectById(deptId);
+            if (department == null || !"0".equals(department.getStatus())) {
+                throw new ServiceException("辖区归属组织不存在或已停用");
+            }
+        } else {
+            Long userId = parseLongOrNull(request.userId());
+            SysUser user = userId == null ? null : sysUserMapper.selectById(userId);
+            PatrolDeviceBinding badgeBinding = activeBindingByBadgeNo(request.badgeNo());
+            if ((user == null || !"0".equals(user.getStatus())) && badgeBinding == null) {
+                throw new ServiceException("辖区归属人员不存在或已停用");
+            }
+        }
+        boolean creating = request.areaId() == null || request.areaId().isBlank();
+        PatrolArea area = creating ? null : areaMapper.selectById(request.areaId());
+        if (!creating && area == null) {
+            throw new ServiceException("要更新的执勤辖区不存在");
+        }
+        if (creating) {
             area = new PatrolArea();
-            area.setAreaId(blankToDefault(request.areaId(), "AREA-" + IdUtil.fastSimpleUUID()));
+            area.setAreaId("AREA-" + IdUtil.fastSimpleUUID());
             area.setTenantId(currentTenantId());
             area.setDelFlag("0");
             area.setCreateTime(new Date());
         }
-        area.setAreaName(blankToDefault(request.areaName(), "未命名执勤辖区"));
+        area.setAreaName(areaName);
         area.setTeamId("USER".equals(ownerType) ? "" : blankToDefault(request.teamId(), ""));
         area.setTeamName("USER".equals(ownerType) ? "" : blankToDefault(request.teamName(), ""));
         area.setOwnerType(ownerType);
@@ -551,12 +612,21 @@ public class PatrolController {
     }
 
     @PostMapping("/alerts/{alertId}/ack")
+    @Transactional(rollbackFor = Exception.class)
     public R<AlertActionVo> acknowledgeAlert(@PathVariable String alertId) {
         PatrolAlert alert = alertMapper.selectById(alertId);
-        if (alert != null) {
-            alert.setStatus("HANDLING");
-            alertMapper.updateById(alert);
+        if (alert == null) {
+            throw new ServiceException("预警不存在");
         }
+        String currentStatus = blankToDefault(alert.getStatus(), "PENDING").trim().toUpperCase(Locale.ROOT);
+        if ("CLOSED".equals(currentStatus)) {
+            throw new ServiceException("已关闭的预警不能再次确认");
+        }
+        if ("HANDLING".equals(currentStatus)) {
+            return R.ok(new AlertActionVo(alertId, "HANDLING", "预警已处于处置中"));
+        }
+        alert.setStatus("HANDLING");
+        alertMapper.updateById(alert);
         saveAlertDisposition(alertId, "ACK", "HANDLING", null, 0);
         logAudit("ALERT", "确认预警", alertId, "SUCCESS");
         realtimePublisher.publish("ALERT_UPDATED", "alerts", "预警已确认", alertId + " 已进入处置中", alertId,
@@ -564,21 +634,75 @@ public class PatrolController {
         return R.ok(new AlertActionVo(alertId, "HANDLING", "预警已确认，进入处置中"));
     }
 
+    @PostMapping("/alerts/{alertId}/assign")
+    @Transactional(rollbackFor = Exception.class)
+    public R<AlertActionVo> assignAlert(@PathVariable String alertId, @RequestBody AlertAssignBo bo) {
+        PatrolAlert alert = alertMapper.selectById(alertId);
+        if (alert == null) {
+            throw new ServiceException("预警不存在");
+        }
+        if ("CLOSED".equalsIgnoreCase(blankToDefault(alert.getStatus(), ""))) {
+            throw new ServiceException("已关闭的预警不能再次指派");
+        }
+        if (bo == null || bo.officerName() == null || bo.officerName().isBlank()
+            || bo.deviceId() == null || bo.deviceId().isBlank()) {
+            throw new ServiceException("请选择已绑定设备的处置警员");
+        }
+        PatrolDevice assignedDevice = deviceMapper.selectById(bo.deviceId().trim());
+        if (assignedDevice == null) {
+            throw new ServiceException("指派设备不存在");
+        }
+        alert.setStatus("HANDLING");
+        alert.setAssignedOfficerName(bo.officerName().trim());
+        alert.setAssignedBadgeNo(blankToDefault(bo.badgeNo(), "").trim());
+        alert.setAssignedDeviceId(bo.deviceId().trim());
+        alertMapper.updateById(alert);
+        String note = blankToDefault(bo.note(), "已指派" + bo.officerName().trim() + "前往核查");
+        saveAlertDisposition(alertId, "ASSIGN", "ASSIGNED", note, 0);
+        pushIncidentAssignment(
+            bo.deviceId().trim(),
+            "预警处置任务：" + blankToDefault(alert.getTitle(), alertId),
+            blankToDefault(alert.getLocationText(), "位置待确认") + "；" + note,
+            alertId
+        );
+        logAudit("ALERT", "指派预警处置警员", alertId, "SUCCESS");
+        realtimePublisher.publish("ALERT_DISPATCHED", "alerts", "预警已指派", bo.officerName().trim() + " · " + alertId, alertId,
+            realtimePublisher.payload("alertId", alertId, "status", "HANDLING", "officerName", bo.officerName().trim(),
+                "badgeNo", bo.badgeNo(), "deviceId", bo.deviceId().trim()));
+        return R.ok(new AlertActionVo(alertId, "HANDLING", "预警已指派并推送到移动端"));
+    }
+
     @PostMapping("/alerts/{alertId}/close")
+    @Transactional(rollbackFor = Exception.class)
     public R<AlertActionVo> closeAlert(@PathVariable String alertId, @RequestBody AlertCloseBo bo) {
         PatrolAlert alert = alertMapper.selectById(alertId);
-        if (alert != null) {
-            alert.setStatus("CLOSED");
-            alert.setCloseResult(bo.result());
-            alert.setCloseNote(bo.note());
-            alertMapper.updateById(alert);
+        if (alert == null) {
+            throw new ServiceException("预警不存在");
         }
+        if ("CLOSED".equalsIgnoreCase(blankToDefault(alert.getStatus(), ""))) {
+            return R.ok(new AlertActionVo(alertId, "CLOSED", "预警已关闭，无需重复提交"));
+        }
+        if (bo == null) {
+            throw new ServiceException("预警处置结果不能为空");
+        }
+        String result = blankToDefault(bo.result(), "").trim().toUpperCase(Locale.ROOT);
+        String note = blankToDefault(bo.note(), "").trim();
+        if (!SUPPORTED_ALERT_CLOSE_RESULTS.contains(result)) {
+            throw new ServiceException("不支持的预警处置结果");
+        }
+        if (note.isBlank()) {
+            throw new ServiceException("请填写真实处置说明");
+        }
+        alert.setStatus("CLOSED");
+        alert.setCloseResult(result);
+        alert.setCloseNote(note);
+        alertMapper.updateById(alert);
         saveAlertAttachments(alertId, bo.attachments());
-        saveAlertDisposition(alertId, "CLOSE", bo.result(), bo.note(), bo.attachments() == null ? 0 : bo.attachments().size());
-        logAudit("ALERT", "关闭预警：" + bo.result(), alertId, "SUCCESS");
-        realtimePublisher.publish("ALERT_UPDATED", "alerts", "预警已关闭", alertId + " 处置结果：" + bo.result(), alertId,
-            realtimePublisher.payload("alertId", alertId, "status", "CLOSED", "result", bo.result()));
-        return R.ok(new AlertActionVo(alertId, "CLOSED", "处置结果已提交：" + bo.result()));
+        saveAlertDisposition(alertId, "CLOSE", result, note, bo.attachments() == null ? 0 : bo.attachments().size());
+        logAudit("ALERT", "关闭预警：" + result, alertId, "SUCCESS");
+        realtimePublisher.publish("ALERT_UPDATED", "alerts", "预警已关闭", alertId + " 处置结果：" + result, alertId,
+            realtimePublisher.payload("alertId", alertId, "status", "CLOSED", "result", result));
+        return R.ok(new AlertActionVo(alertId, "CLOSED", "处置结果已提交：" + result));
     }
 
     @GetMapping("/alerts/{alertId}/attachments")
@@ -586,6 +710,9 @@ public class PatrolController {
         @PathVariable String alertId,
         @RequestParam(defaultValue = "1") int page,
         @RequestParam(defaultValue = "20") int pageSize) {
+        if (alertMapper.selectById(alertId) == null) {
+            throw new ServiceException("预警不存在");
+        }
         return R.ok(pageOf(alertAttachmentMapper, new LambdaQueryWrapper<PatrolAlertAttachment>()
             .eq(PatrolAlertAttachment::getAlertId, alertId)
             .orderByDesc(PatrolAlertAttachment::getCreateTime), page, pageSize, this::toAlertAttachmentVo));
@@ -631,7 +758,17 @@ public class PatrolController {
     }
 
     @DeleteMapping("/media/{fileId}")
+    @Transactional(rollbackFor = Exception.class)
     public R<MediaActionVo> deleteMedia(@PathVariable String fileId) {
+        List<PatrolMedia> files = mediaMapper.selectList(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId));
+        List<Long> ossIds = files.stream()
+            .map(PatrolMedia::getOssId)
+            .filter(java.util.Objects::nonNull)
+            .distinct()
+            .toList();
+        if (!ossIds.isEmpty()) {
+            ossService.deleteWithValidByIds(ossIds, true);
+        }
         int deleted = mediaMapper.delete(new LambdaQueryWrapper<PatrolMedia>().eq(PatrolMedia::getFileId, fileId));
         logAudit("MEDIA", "删除媒体证据", fileId, deleted > 0 ? "SUCCESS" : "FAILED");
         realtimePublisher.publish("MEDIA_DELETED", "media", deleted > 0 ? "媒体证据已删除" : "媒体删除失败", fileId, fileId,
@@ -654,7 +791,11 @@ public class PatrolController {
 
     @GetMapping("/daily-reports/{reportId}")
     public R<DailyReportVo> dailyReport(@PathVariable String reportId) {
-        return R.ok(toDailyReportVo(dailyReportMapper.selectById(reportId)));
+        PatrolDailyReport report = dailyReportMapper.selectById(reportId);
+        if (report == null) {
+            throw new ServiceException("日报不存在");
+        }
+        return R.ok(toDailyReportVo(report));
     }
 
     @PatchMapping("/daily-reports/{reportId}/status")
@@ -723,6 +864,7 @@ public class PatrolController {
         if (!fileName.toLowerCase().endsWith(".apk")) {
             throw new ServiceException("仅支持上传 APK 安装包");
         }
+        ApkPackageMetadata packageMetadata = validateApkPackage(file);
         String sha256 = sha256(file);
         SysOssVo oss = ossService.upload(file);
         String fileId = "FILE-" + oss.getOssId();
@@ -749,49 +891,99 @@ public class PatrolController {
         media.setBizType("APP_VERSION");
         media.setBizId(fileId);
         media.setEvidenceSource("VERSION_PACKAGE");
+        media.setMetadataJson(JsonUtils.toJsonString(packageMetadata));
         media.setDelFlag("0");
         mediaMapper.insert(media);
         logAudit("VERSION", "上传App安装包", fileName, "SUCCESS");
-        return R.ok(new AppVersionPackageVo(fileId, fileName, downloadUrl, sha256, file.getSize(), sizeText(file.getSize())));
+        return R.ok(new AppVersionPackageVo(
+            fileId,
+            fileName,
+            downloadUrl,
+            sha256,
+            file.getSize(),
+            sizeText(file.getSize()),
+            packageMetadata.packageName(),
+            packageMetadata.versionCode(),
+            packageMetadata.versionName()
+        ));
     }
 
     @PostMapping("/versions")
     public R<AppVersionVo> createVersion(@RequestBody AppVersionBo bo) {
-        PatrolMedia packageFile = bo.fileId() == null || bo.fileId().isBlank() ? null : mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
+        validateAppVersionRequest(bo);
+        PatrolMedia packageFile = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
             .eq(PatrolMedia::getFileId, bo.fileId())
             .eq(PatrolMedia::getStorageSide, "APP_VERSION")
             .orderByDesc(PatrolMedia::getCreateTime)
             .last("limit 1"));
+        if (packageFile == null || packageFile.getOssId() == null) {
+            throw new ServiceException("APK 安装包不存在或尚未完成入库");
+        }
+        ApkPackageMetadata packageMetadata = JsonUtils.parseObject(packageFile.getMetadataJson(), ApkPackageMetadata.class);
+        if (packageMetadata == null || packageMetadata.versionCode() == null || packageMetadata.versionName() == null) {
+            throw new ServiceException("APK 缺少可校验的包版本元数据，请重新上传安装包");
+        }
+        if (!packageMetadata.versionCode().equals(bo.versionCode())) {
+            throw new ServiceException("填写的 versionCode 与 APK 内版本号不一致，应为 " + packageMetadata.versionCode());
+        }
+        if (!packageMetadata.versionName().equals(bo.versionName().trim())) {
+            throw new ServiceException("填写的版本名称与 APK 内 versionName 不一致，应为 " + packageMetadata.versionName());
+        }
+        if (appVersionMapper.selectCount(new LambdaQueryWrapper<PatrolAppVersion>()
+            .eq(PatrolAppVersion::getVersionCode, bo.versionCode())) > 0) {
+            throw new ServiceException("版本号已存在，请使用新的 versionCode");
+        }
         PatrolAppVersion version = new PatrolAppVersion();
         version.setVersionId("VER-" + UUID.randomUUID());
         version.setTenantId(currentTenantId());
         version.setVersionCode(bo.versionCode());
-        version.setVersionName(blankToDefault(bo.versionName(), "1.0.0"));
+        version.setVersionName(bo.versionName().trim());
         version.setForceUpdate(Boolean.TRUE.equals(bo.forceUpdate()));
-        version.setChangelog(bo.changelog());
-        version.setDownloadUrl(blankToDefault(bo.downloadUrl(), packageFile == null ? "" : blankToDefault(packageFile.getContentUri(), "/files/" + packageFile.getFileId() + "/download")));
-        version.setSha256(blankToDefault(bo.sha256(), packageFile == null ? "" : packageFile.getSha256()));
+        version.setChangelog(bo.changelog().trim());
+        version.setDownloadUrl(blankToDefault(packageFile.getContentUri(), "/files/" + packageFile.getFileId() + "/download"));
+        version.setSha256(packageFile.getSha256());
         version.setFileId(bo.fileId());
         version.setStatus("PUBLISHED");
         version.setPublishedAt(new Date());
         version.setDelFlag("0");
         appVersionMapper.insert(version);
         logAudit("VERSION", "新增App版本", version.getVersionName(), "SUCCESS");
+        publishAppVersion(version);
         return R.ok(toAppVersionVo(version));
     }
 
     @PatchMapping("/versions/{versionId}/status")
     public R<AppVersionVo> updateVersionStatus(@PathVariable String versionId, @RequestBody StatusBo bo) {
         PatrolAppVersion version = appVersionMapper.selectById(versionId);
-        if (version != null) {
-            version.setStatus(bo.status());
-            if ("PUBLISHED".equals(bo.status())) {
-                version.setPublishedAt(new Date());
-            }
-            appVersionMapper.updateById(version);
-            logAudit("VERSION", "更新App版本状态：" + bo.status(), versionId, "SUCCESS");
+        if (version == null) {
+            throw new ServiceException("App 版本不存在");
         }
-        return R.ok(version == null ? null : toAppVersionVo(version));
+        String status = normalizeReleaseStatus(bo);
+        if (status.equals(version.getStatus())) {
+            return R.ok(toAppVersionVo(version));
+        }
+        version.setStatus(status);
+        if ("PUBLISHED".equals(status)) {
+            version.setPublishedAt(new Date());
+        }
+        appVersionMapper.updateById(version);
+        logAudit("VERSION", "更新App版本状态：" + status, versionId, "SUCCESS");
+        if ("PUBLISHED".equals(status)) {
+            publishAppVersion(version);
+        }
+        return R.ok(toAppVersionVo(version));
+    }
+
+    private void publishAppVersion(PatrolAppVersion version) {
+        realtimePublisher.publish("APP_VERSION_PUBLISHED", "versions", "PatrolLink 新版本已发布",
+            version.getVersionName(), version.getVersionId(), realtimePublisher.payload(
+                "versionId", version.getVersionId(),
+                "versionCode", version.getVersionCode(),
+                "versionName", version.getVersionName(),
+                "forceUpdate", version.getForceUpdate(),
+                "downloadUrl", version.getDownloadUrl(),
+                "sha256", version.getSha256()
+            ));
     }
 
     @GetMapping("/firmware-versions")
@@ -808,6 +1000,12 @@ public class PatrolController {
         String lower = fileName.toLowerCase();
         if (!lower.endsWith(".bin") && !lower.endsWith(".zip") && !lower.endsWith(".ufw")) {
             throw new ServiceException("仅支持上传 bin/zip/ufw 固件包");
+        }
+        if (file.isEmpty()) {
+            throw new ServiceException("固件包不能为空");
+        }
+        if (lower.endsWith(".zip")) {
+            validateZipPackage(file, "固件 ZIP 包无法解析或内容为空");
         }
         String sha256 = sha256(file);
         SysOssVo oss = ossService.upload(file);
@@ -843,55 +1041,86 @@ public class PatrolController {
 
     @PostMapping("/firmware-versions")
     public R<FirmwareVersionVo> createFirmwareVersion(@RequestBody FirmwareVersionBo bo) {
-        PatrolMedia packageFile = bo.fileId() == null || bo.fileId().isBlank() ? null : mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
+        validateFirmwareVersionRequest(bo);
+        PatrolMedia packageFile = mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
             .eq(PatrolMedia::getFileId, bo.fileId())
             .eq(PatrolMedia::getStorageSide, "FIRMWARE_VERSION")
             .orderByDesc(PatrolMedia::getCreateTime)
             .last("limit 1"));
+        if (packageFile == null || packageFile.getOssId() == null) {
+            throw new ServiceException("固件包不存在或尚未完成入库");
+        }
+        if (firmwareVersionMapper.selectCount(new LambdaQueryWrapper<PatrolFirmwareVersion>()
+            .eq(PatrolFirmwareVersion::getDeviceType, bo.deviceType().trim().toUpperCase(Locale.ROOT))
+            .eq(PatrolFirmwareVersion::getVersionCode, bo.versionCode())) > 0) {
+            throw new ServiceException("该设备类型的固件排序版本号已存在");
+        }
         PatrolFirmwareVersion firmware = new PatrolFirmwareVersion();
         firmware.setFirmwareId("FW-" + UUID.randomUUID());
         firmware.setTenantId(currentTenantId());
-        firmware.setDeviceType(blankToDefault(bo.deviceType(), "HEADSET"));
+        firmware.setDeviceType(bo.deviceType().trim().toUpperCase(Locale.ROOT));
         firmware.setVendor(blankToDefault(bo.vendor(), ""));
         firmware.setChipset(blankToDefault(bo.chipset(), ""));
         firmware.setDeviceModel(blankToDefault(bo.deviceModel(), ""));
         firmware.setHardwareVersion(blankToDefault(bo.hardwareVersion(), ""));
-        firmware.setFirmwareType(blankToDefault(bo.firmwareType(), "FULL"));
-        firmware.setVersionCode(value(bo.versionCode(), 1));
-        firmware.setVersionName(blankToDefault(bo.versionName(), ""));
+        firmware.setFirmwareType(blankToDefault(bo.firmwareType(), "FULL").trim().toUpperCase(Locale.ROOT));
+        firmware.setVersionCode(bo.versionCode());
+        firmware.setVersionName(bo.versionName().trim());
         firmware.setMinCurrentVersion(blankToDefault(bo.minCurrentVersion(), ""));
         firmware.setMaxCurrentVersion(blankToDefault(bo.maxCurrentVersion(), ""));
         firmware.setForceUpdate(Boolean.TRUE.equals(bo.forceUpdate()));
-        firmware.setChangelog(blankToDefault(bo.changelog(), ""));
-        firmware.setDownloadUrl(blankToDefault(bo.downloadUrl(), packageFile == null ? "" : blankToDefault(packageFile.getContentUri(), "/files/" + packageFile.getFileId() + "/download")));
-        firmware.setSha256(blankToDefault(bo.sha256(), packageFile == null ? "" : packageFile.getSha256()));
+        firmware.setChangelog(bo.changelog().trim());
+        firmware.setDownloadUrl(blankToDefault(packageFile.getContentUri(), "/files/" + packageFile.getFileId() + "/download"));
+        firmware.setSha256(packageFile.getSha256());
         firmware.setFileId(bo.fileId());
-        firmware.setFileSizeBytes(packageFile == null ? bo.fileSizeBytes() : packageFile.getFileSizeBytes());
-        firmware.setPackageFormat(blankToDefault(bo.packageFormat(), packageFile == null ? "" : packageFormat(packageFile.getFileName())));
-        firmware.setUpgradeMode(blankToDefault(bo.upgradeMode(), "APP_BLE"));
-        firmware.setGrayScope(blankToDefault(bo.grayScope(), "ALL"));
-        firmware.setGrayTargets(blankToDefault(bo.grayTargets(), ""));
+        firmware.setFileSizeBytes(packageFile.getFileSizeBytes());
+        firmware.setPackageFormat(packageFormat(packageFile.getFileName()));
+        firmware.setUpgradeMode(blankToDefault(bo.upgradeMode(), "APP_BLE").trim().toUpperCase(Locale.ROOT));
+        firmware.setGrayScope(FirmwareRolloutPolicy.normalizeScope(bo.grayScope()));
+        firmware.setGrayTargets(FirmwareRolloutPolicy.normalizeTargets(bo.grayTargets()));
         firmware.setStatus("PUBLISHED");
         firmware.setPublishedAt(new Date());
         firmware.setRemark(blankToDefault(bo.remark(), ""));
         firmware.setDelFlag("0");
         firmwareVersionMapper.insert(firmware);
         logAudit("FIRMWARE", "新增设备固件版本", firmware.getVersionName(), "SUCCESS");
+        publishFirmwareVersion(firmware);
         return R.ok(toFirmwareVersionVo(firmware));
     }
 
     @PatchMapping("/firmware-versions/{firmwareId}/status")
     public R<FirmwareVersionVo> updateFirmwareVersionStatus(@PathVariable String firmwareId, @RequestBody StatusBo bo) {
         PatrolFirmwareVersion firmware = firmwareVersionMapper.selectById(firmwareId);
-        if (firmware != null) {
-            firmware.setStatus(bo.status());
-            if ("PUBLISHED".equals(bo.status())) {
-                firmware.setPublishedAt(new Date());
-            }
-            firmwareVersionMapper.updateById(firmware);
-            logAudit("FIRMWARE", "更新设备固件状态：" + bo.status(), firmwareId, "SUCCESS");
+        if (firmware == null) {
+            throw new ServiceException("设备固件版本不存在");
         }
-        return R.ok(firmware == null ? null : toFirmwareVersionVo(firmware));
+        String status = normalizeReleaseStatus(bo);
+        if (status.equals(firmware.getStatus())) {
+            return R.ok(toFirmwareVersionVo(firmware));
+        }
+        firmware.setStatus(status);
+        if ("PUBLISHED".equals(status)) {
+            firmware.setPublishedAt(new Date());
+        }
+        firmwareVersionMapper.updateById(firmware);
+        logAudit("FIRMWARE", "更新设备固件状态：" + status, firmwareId, "SUCCESS");
+        if ("PUBLISHED".equals(status)) {
+            publishFirmwareVersion(firmware);
+        }
+        return R.ok(toFirmwareVersionVo(firmware));
+    }
+
+    private void publishFirmwareVersion(PatrolFirmwareVersion firmware) {
+        realtimePublisher.publish("FIRMWARE_VERSION_PUBLISHED", "operations", "设备固件新版本已发布",
+            firmware.getVersionName(), firmware.getFirmwareId(), realtimePublisher.payload(
+                "firmwareId", firmware.getFirmwareId(),
+                "deviceType", firmware.getDeviceType(),
+                "versionCode", firmware.getVersionCode(),
+                "versionName", firmware.getVersionName(),
+                "forceUpdate", firmware.getForceUpdate(),
+                "downloadUrl", firmware.getDownloadUrl(),
+                "sha256", firmware.getSha256()
+            ));
     }
 
     @GetMapping("/firmware-upgrade-tasks")
@@ -963,29 +1192,64 @@ public class PatrolController {
         return R.ok(pageList(timeline, page, pageSize));
     }
 
+    @PostMapping("/sos/{sosId}/ack")
+    @Transactional(rollbackFor = Exception.class)
+    public R<SosActionVo> acknowledgeSos(@PathVariable String sosId) {
+        PatrolSosEvent event = requireOpenSos(sosId);
+        if (!"ACTIVE".equalsIgnoreCase(blankToDefault(event.getPhase(), ""))) {
+            return R.ok(new SosActionVo(sosId, event.getPhase(), "SOS 已完成接警确认"));
+        }
+        event.setPhase("RECEIVED");
+        event.setReceivedAt(new Date());
+        event.setMessage("指挥台已接警，正在组织处置");
+        sosEventMapper.updateById(event);
+        saveSosDisposition(sosId, "ACK", "RECEIVED", event.getMessage(), null, null, null, null, null);
+        logAudit("SOS", "确认接收SOS求助", sosId, "SUCCESS");
+        realtimePublisher.publish("SOS_UPDATED", "sos", "SOS 已接警", event.getOfficerName() + " 的求助已由指挥台接收", sosId,
+            realtimePublisher.payload("sosId", sosId, "phase", "RECEIVED", "message", event.getMessage()));
+        return R.ok(new SosActionVo(sosId, "RECEIVED", "已确认接警并同步到移动端"));
+    }
+
     @PostMapping("/sos/{sosId}/backup")
+    @Transactional(rollbackFor = Exception.class)
     public R<SosActionVo> assignSosBackup(@PathVariable String sosId, @RequestBody SosBackupBo bo) {
-        PatrolSosEvent event = sosEventMapper.selectById(sosId);
-        if (event == null) {
-            return R.ok(new SosActionVo(sosId, "FAILED", "SOS事件不存在"));
+        PatrolSosEvent event = requireOpenSos(sosId);
+        if (bo == null || bo.contactName() == null || bo.contactName().isBlank()) {
+            throw new ServiceException("请选择增援警员或单位");
+        }
+        if (bo.backupEtaMinutes() == null || bo.backupEtaMinutes() <= 0 || bo.backupEtaMinutes() > 1_440) {
+            throw new ServiceException("增援预计到达时间必须在 1 到 1440 分钟之间");
         }
         event.setBackupEtaMinutes(bo.backupEtaMinutes());
+        event.setPhase("BACKUP_ENROUTE");
+        event.setReceivedAt(event.getReceivedAt() == null ? new Date() : event.getReceivedAt());
+        event.setAssignedOfficerName(bo.contactName().trim());
+        event.setAssignedBadgeNo(blankToDefault(bo.badgeNo(), "").trim());
+        event.setAssignedDeviceId(blankToDefault(bo.deviceId(), "").trim());
         event.setMessage(blankToDefault(bo.note(), "已指派增援：" + blankToDefault(bo.contactName(), "增援警力")));
         sosEventMapper.updateById(event);
         saveSosDisposition(sosId, "ASSIGN_BACKUP", "ASSIGNED", event.getMessage(), bo.contactName(), bo.contactPhone(), null, null, bo.backupEtaMinutes());
         logAudit("SOS", "指派SOS增援", sosId, "SUCCESS");
-        realtimePublisher.publish("SOS_BACKUP_ASSIGNED", "sos", "SOS增援已指派", sosId + " ETA " + bo.backupEtaMinutes() + "分钟", sosId,
-            realtimePublisher.payload("sosId", sosId, "backupEtaMinutes", bo.backupEtaMinutes(), "contactName", bo.contactName()));
-        return R.ok(new SosActionVo(sosId, event.getPhase(), "增援信息已记录"));
+        if (bo.deviceId() != null && !bo.deviceId().isBlank()) {
+            pushIncidentAssignment(
+                bo.deviceId().trim(),
+                "SOS 增援任务：" + blankToDefault(event.getOfficerName(), sosId),
+                blankToDefault(event.getAddress(), "位置待确认") + "；预计 " + bo.backupEtaMinutes() + " 分钟到达",
+                sosId
+            );
+        }
+        realtimePublisher.publish("SOS_UPDATED", "sos", "SOS增援已出发", bo.contactName() + " · ETA " + bo.backupEtaMinutes() + "分钟", sosId,
+            realtimePublisher.payload("sosId", sosId, "phase", "BACKUP_ENROUTE", "backupEtaMinutes", bo.backupEtaMinutes(),
+                "contactName", bo.contactName(), "badgeNo", bo.badgeNo(), "deviceId", bo.deviceId(), "message", event.getMessage()));
+        return R.ok(new SosActionVo(sosId, event.getPhase(), "增援已指派并同步到相关移动端"));
     }
 
     @PostMapping("/sos/{sosId}/notify")
+    @Transactional(rollbackFor = Exception.class)
     public R<SosActionVo> notifySosContact(@PathVariable String sosId, @RequestBody SosContactBo bo) {
-        if (sosEventMapper.selectById(sosId) == null) {
-            return R.ok(new SosActionVo(sosId, "FAILED", "SOS事件不存在"));
-        }
-        if (bo.contactName() == null || bo.contactName().isBlank() || bo.contactPhone() == null || bo.contactPhone().isBlank()) {
-            return R.ok(new SosActionVo(sosId, "FAILED", "请填写实际联系人和联系电话"));
+        requireOpenSos(sosId);
+        if (bo == null || bo.contactName() == null || bo.contactName().isBlank() || bo.contactPhone() == null || bo.contactPhone().isBlank()) {
+            throw new ServiceException("请填写实际联系人和联系电话");
         }
         saveSosDisposition(sosId, "MANUAL_CONTACT_CONFIRMED", "RECORDED", blankToDefault(bo.note(), "指挥员已人工确认通知"), bo.contactName(), bo.contactPhone(), null, null, null);
         logAudit("SOS", "记录人工联系人通知结果", sosId, "SUCCESS");
@@ -995,29 +1259,47 @@ public class PatrolController {
     }
 
     @PostMapping("/sos/{sosId}/notes")
+    @Transactional(rollbackFor = Exception.class)
     public R<SosActionVo> addSosNote(@PathVariable String sosId, @RequestBody SosNoteBo bo) {
-        if (sosEventMapper.selectById(sosId) == null) {
-            return R.ok(new SosActionVo(sosId, "FAILED", "SOS事件不存在"));
+        requireOpenSos(sosId);
+        if (bo == null || bo.note() == null || bo.note().isBlank()) {
+            throw new ServiceException("SOS 处置说明不能为空");
         }
-        saveSosDisposition(sosId, "NOTE", "RECORDED", bo.note(), null, null, null, null, null);
+        saveSosDisposition(sosId, "NOTE", "RECORDED", bo.note().trim(), null, null, null, null, null);
         logAudit("SOS", "记录SOS处置说明", sosId, "SUCCESS");
         return R.ok(new SosActionVo(sosId, "RECORDED", "处置说明已记录"));
     }
 
     @PostMapping("/sos/{sosId}/close")
-    public R<SosActionVo> closeSos(@PathVariable String sosId) {
+    @Transactional(rollbackFor = Exception.class)
+    public R<SosActionVo> closeSos(@PathVariable String sosId, @RequestBody SosCloseBo bo) {
         PatrolSosEvent event = sosEventMapper.selectById(sosId);
-        if (event != null) {
-            event.setPhase("CLOSED");
-            event.setMessage("平台端已处置关闭");
-            event.setRecordingAudio(false);
-            sosEventMapper.updateById(event);
-            saveSosDisposition(sosId, "CLOSE", "CLOSED", "平台端已处置关闭", null, null, null, null, event.getBackupEtaMinutes());
+        if (event == null) {
+            throw new ServiceException("SOS事件不存在");
         }
-        logAudit("SOS", "关闭SOS求助", sosId, event == null ? "FAILED" : "SUCCESS");
-        realtimePublisher.publish("SOS_CLOSED", "sos", event == null ? "SOS关闭失败" : "SOS求助已关闭", sosId, sosId,
-            realtimePublisher.payload("sosId", sosId, "phase", event == null ? "FAILED" : "CLOSED"));
-        return R.ok(new SosActionVo(sosId, event == null ? "FAILED" : "CLOSED", event == null ? "SOS事件不存在" : "SOS事件已关闭"));
+        if (!isOpenSosPhase(event.getPhase())) {
+            return R.ok(new SosActionVo(sosId, event.getPhase(), "SOS事件已结束，无需重复提交"));
+        }
+        if (bo == null || bo.result() == null || !SUPPORTED_SOS_RESOLUTION_RESULTS.contains(bo.result().trim().toUpperCase(Locale.ROOT))) {
+            throw new ServiceException("请选择有效的 SOS 处置结果");
+        }
+        String result = bo.result().trim().toUpperCase(Locale.ROOT);
+        String note = blankToDefault(bo.note(), "").trim();
+        if (note.isBlank()) {
+            throw new ServiceException("请填写 SOS 处置说明");
+        }
+        event.setPhase(result);
+        event.setResolvedAt(new Date());
+        event.setResolutionResult(result);
+        event.setResolutionNote(note);
+        event.setMessage(note);
+        event.setRecordingAudio(false);
+        sosEventMapper.updateById(event);
+        saveSosDisposition(sosId, "CLOSE", result, note, null, null, null, null, event.getBackupEtaMinutes());
+        logAudit("SOS", "完成SOS处置：" + result, sosId, "SUCCESS");
+        realtimePublisher.publish("SOS_UPDATED", "sos", "SOS处置已完成", note, sosId,
+            realtimePublisher.payload("sosId", sosId, "phase", result, "result", result, "message", note));
+        return R.ok(new SosActionVo(sosId, result, "SOS处置结果已回写移动端"));
     }
 
     @PostMapping("/messages/send")
@@ -1089,13 +1371,19 @@ public class PatrolController {
 
     @PostMapping("/control/persons")
     public R<ControlPersonVo> createControlPerson(@RequestBody ControlPersonBo bo) {
+        validateControlPersonRequest(bo);
+        String name = bo.name().trim();
+        String idCardNo = blankToDefault(bo.idCardNo(), "").trim();
+        if (findControlPerson(name, idCardNo) != null) {
+            throw new ServiceException("该人员已存在于布控库");
+        }
         PatrolControlPerson person = new PatrolControlPerson();
         person.setControlId("CP-" + UUID.randomUUID());
         person.setTenantId(currentTenantId());
-        person.setName(bo.name());
-        person.setCategory(blankToDefault(bo.category(), "重点关注"));
-        person.setIdCardNo(bo.idCardNo());
-        person.setRiskLevel(blankToDefault(bo.riskLevel(), "MEDIUM"));
+        person.setName(name);
+        person.setCategory(bo.category().trim());
+        person.setIdCardNo(idCardNo);
+        person.setRiskLevel(bo.riskLevel().trim().toUpperCase(Locale.ROOT));
         person.setStatus("ENABLED");
         person.setSource("平台录入");
         person.setExpiresAt(parseDate(bo.expiresAt()));
@@ -1117,6 +1405,12 @@ public class PatrolController {
         if (person == null) {
             throw new ServiceException("人员布控不存在");
         }
+        if (bo == null || bo.faceImageUrl() == null || bo.faceImageUrl().isBlank()) {
+            throw new ServiceException("人脸底库图片地址不能为空");
+        }
+        if (bo.faceImageSha256() == null || !bo.faceImageSha256().matches("(?i)^[0-9a-f]{64}$")) {
+            throw new ServiceException("人脸底库图片 SHA-256 不合法");
+        }
         person.setFaceImageUrl(bo.faceImageUrl());
         person.setFaceImageSha256(bo.faceImageSha256());
         person.setFaceUpdatedAt(new Date());
@@ -1137,6 +1431,7 @@ public class PatrolController {
         if (!contentType.startsWith("image/") && !lowerName.endsWith(".jpg") && !lowerName.endsWith(".jpeg") && !lowerName.endsWith(".png") && !lowerName.endsWith(".webp")) {
             throw new ServiceException("仅支持上传人脸图片");
         }
+        validateImageFile(file);
         String sha256 = sha256(file);
         SysOssVo oss = ossService.upload(file);
         String fileId = "FILE-" + oss.getOssId();
@@ -1185,12 +1480,14 @@ public class PatrolController {
     @PatchMapping("/control/persons/{controlId}/status")
     public R<ControlStatusVo> updateControlPersonStatus(@PathVariable String controlId, @RequestBody StatusBo bo) {
         PatrolControlPerson person = controlPersonMapper.selectById(controlId);
-        if (person != null) {
-            person.setStatus(bo.status());
-            controlPersonMapper.updateById(person);
+        if (person == null) {
+            throw new ServiceException("人员布控不存在");
         }
-        logAudit("CONTROL", "更新人员布控状态：" + bo.status(), controlId, person == null ? "FAILED" : "SUCCESS");
-        return R.ok(new ControlStatusVo(controlId, bo.status(), person == null ? "人员布控不存在" : "人员布控状态已更新"));
+        String status = normalizeControlStatus(bo);
+        person.setStatus(status);
+        controlPersonMapper.updateById(person);
+        logAudit("CONTROL", "更新人员布控状态：" + status, controlId, "SUCCESS");
+        return R.ok(new ControlStatusVo(controlId, status, "人员布控状态已更新"));
     }
 
     @GetMapping("/control/vehicles")
@@ -1203,13 +1500,19 @@ public class PatrolController {
 
     @PostMapping("/control/vehicles")
     public R<ControlVehicleVo> createControlVehicle(@RequestBody ControlVehicleBo bo) {
+        validateControlVehicleRequest(bo);
+        String plateNo = normalizePlateNo(bo.plateNo());
+        if (controlVehicleMapper.selectCount(new LambdaQueryWrapper<PatrolControlVehicle>()
+            .eq(PatrolControlVehicle::getPlateNo, plateNo)) > 0) {
+            throw new ServiceException("该车牌已存在于布控库");
+        }
         PatrolControlVehicle vehicle = new PatrolControlVehicle();
         vehicle.setControlId("CV-" + UUID.randomUUID());
         vehicle.setTenantId(currentTenantId());
-        vehicle.setPlateNo(bo.plateNo());
-        vehicle.setVehicleDesc(blankToDefault(bo.vehicleDesc(), "未填写"));
-        vehicle.setVehicleType(bo.vehicleType());
-        vehicle.setRiskLevel(blankToDefault(bo.riskLevel(), "MEDIUM"));
+        vehicle.setPlateNo(plateNo);
+        vehicle.setVehicleDesc(bo.vehicleDesc().trim());
+        vehicle.setVehicleType(blankToDefault(bo.vehicleType(), "OTHER").trim().toUpperCase(Locale.ROOT));
+        vehicle.setRiskLevel(bo.riskLevel().trim().toUpperCase(Locale.ROOT));
         vehicle.setStatus("ENABLED");
         vehicle.setSource("平台录入");
         vehicle.setExpiresAt(parseDate(bo.expiresAt()));
@@ -1230,12 +1533,14 @@ public class PatrolController {
     @PatchMapping("/control/vehicles/{controlId}/status")
     public R<ControlStatusVo> updateControlVehicleStatus(@PathVariable String controlId, @RequestBody StatusBo bo) {
         PatrolControlVehicle vehicle = controlVehicleMapper.selectById(controlId);
-        if (vehicle != null) {
-            vehicle.setStatus(bo.status());
-            controlVehicleMapper.updateById(vehicle);
+        if (vehicle == null) {
+            throw new ServiceException("车辆布控不存在");
         }
-        logAudit("CONTROL", "更新车辆布控状态：" + bo.status(), controlId, vehicle == null ? "FAILED" : "SUCCESS");
-        return R.ok(new ControlStatusVo(controlId, bo.status(), vehicle == null ? "车辆布控不存在" : "车辆布控状态已更新"));
+        String status = normalizeControlStatus(bo);
+        vehicle.setStatus(status);
+        controlVehicleMapper.updateById(vehicle);
+        logAudit("CONTROL", "更新车辆布控状态：" + status, controlId, "SUCCESS");
+        return R.ok(new ControlStatusVo(controlId, status, "车辆布控状态已更新"));
     }
 
     @GetMapping("/statistics/overview")
@@ -1254,7 +1559,7 @@ public class PatrolController {
             List.of(
                 new MetricVo("设备在线率", onlineRate, onlineDevices + "/" + totalDevices, "success"),
                 new MetricVo("未处置预警", String.valueOf(pendingAlerts), "当前待处理", pendingAlerts > 0 ? "danger" : "success"),
-                new MetricVo("SOS 激活", String.valueOf(sosEvents.stream().filter(item -> "ACTIVE".equals(item.getPhase())).count()), "当前 ACTIVE", "warning"),
+                new MetricVo("SOS 处置中", String.valueOf(sosEvents.stream().filter(item -> isOpenSosPhase(item.getPhase())).count()), "待接警/处置中/增援中", "warning"),
                 new MetricVo("媒体证据", String.valueOf(media.size()), "设备侧 + 云端", "info")
             ),
             dailyTrend(alerts, sosEvents, media, commands),
@@ -1418,16 +1723,16 @@ public class PatrolController {
         alerts.stream()
             .filter(item -> !"CLOSED".equals(item.getStatus()))
             .limit(3)
-            .forEach(item -> items.add(new WorkItemVo(item.getAlertId(), item.getTitle(), officerNameByDevice(item.getSource()), item.getSource(), item.getStatus(), item.getLevel(), blankToDefault(item.getOccurredAt(), "刚刚"))));
+            .forEach(item -> items.add(new WorkItemVo(item.getAlertId(), "alerts", item.getTitle(), officerNameByDevice(item.getSource()), item.getSource(), item.getStatus(), item.getLevel(), blankToDefault(item.getOccurredAt(), "刚刚"))));
         sosEvents.stream()
-            .filter(item -> "ACTIVE".equals(item.getPhase()))
+            .filter(item -> isOpenSosPhase(item.getPhase()))
             .limit(2)
-            .forEach(item -> items.add(new WorkItemVo(item.getSosId(), "一键 SOS 求助", "移动端警员", blankToDefault(item.getAddress(), "未知位置"), item.getPhase(), "CRITICAL", formatDate(item.getCreateTime()))));
+            .forEach(item -> items.add(new WorkItemVo(item.getSosId(), "sos", "一键 SOS 求助", "移动端警员", blankToDefault(item.getAddress(), "未知位置"), item.getPhase(), "CRITICAL", formatDate(item.getCreateTime()))));
         devices.stream()
             .filter(this::isDeviceOnline)
             .filter(item -> value(item.getBatteryPercent()) > 0 && value(item.getBatteryPercent()) < 20)
             .limit(2)
-            .forEach(item -> items.add(new WorkItemVo("device-" + item.getDeviceId(), "设备低电量", officerName(item), item.getDeviceId() + " 电量 " + item.getBatteryPercent() + "%", "待确认", "WARNING", formatDate(item.getLastHeartbeatTime()))));
+            .forEach(item -> items.add(new WorkItemVo(item.getDeviceId(), "devices", "设备低电量", officerName(item), item.getDeviceId() + " 电量 " + item.getBatteryPercent() + "%", "待确认", "WARNING", formatDate(item.getLastHeartbeatTime()))));
         return items.stream().limit(6).toList();
     }
 
@@ -1508,6 +1813,35 @@ public class PatrolController {
         return device == null ? fallbackDevice(deviceId) : device;
     }
 
+    private PatrolDevice requireDevice(String deviceId) {
+        PatrolDevice device = deviceId == null || deviceId.isBlank() ? null : deviceMapper.selectById(deviceId);
+        if (device == null) {
+            throw new ServiceException("设备不存在：" + blankToDefault(deviceId, "-"));
+        }
+        return device;
+    }
+
+    private void validateDeviceSettings(DeviceAdvancedSettingsDto request) {
+        if (request == null) {
+            throw new ServiceException("设备高级设置不能为空");
+        }
+        if (request.getVideoWidth() < 160 || request.getVideoWidth() > 7680) {
+            throw new ServiceException("视频宽度必须在 160 到 7680 之间");
+        }
+        if (request.getVideoHeight() != 0 && (request.getVideoHeight() < 120 || request.getVideoHeight() > 4320)) {
+            throw new ServiceException("视频高度必须为自动值 0，或在 120 到 4320 之间");
+        }
+        if (request.getVideoFrameRate() < 1 || request.getVideoFrameRate() > 120) {
+            throw new ServiceException("视频帧率必须在 1 到 120 之间");
+        }
+        if (request.getRecordingDurationSeconds() < 10 || request.getRecordingDurationSeconds() > 86_400) {
+            throw new ServiceException("录制时长必须在 10 秒到 24 小时之间");
+        }
+        if (request.getBrightnessLevel() < 0 || request.getBrightnessLevel() > 10) {
+            throw new ServiceException("亮度档位必须在 0 到 10 之间");
+        }
+    }
+
     private PatrolDevice fallbackDevice(String deviceId) {
         PatrolDevice device = new PatrolDevice();
         device.setDeviceId(deviceId);
@@ -1532,6 +1866,7 @@ public class PatrolController {
     }
 
     private AlertVo toAlertVo(PatrolAlert alert) {
+        PatrolDevice sourceDevice = alert.getSource() == null ? null : deviceMapper.selectById(alert.getSource());
         return new AlertVo(
             alert.getAlertId(),
             alertType(alert),
@@ -1540,10 +1875,15 @@ public class PatrolController {
             blankToDefault(alert.getSource(), "-"),
             officerNameByDevice(alert.getSource()),
             blankToDefault(alert.getLocationText(), "-"),
+            alert.getLatitude() == null && sourceDevice != null ? sourceDevice.getLatitude() : alert.getLatitude(),
+            alert.getLongitude() == null && sourceDevice != null ? sourceDevice.getLongitude() : alert.getLongitude(),
             alert.getStatus(),
             alert.getLevel(),
             blankToDefault(alert.getConfidence(), "-"),
-            blankToDefault(alert.getOccurredAt(), formatDate(alert.getCreateTime()))
+            blankToDefault(alert.getOccurredAt(), formatDate(alert.getCreateTime())),
+            alert.getAssignedOfficerName(),
+            alert.getAssignedBadgeNo(),
+            alert.getAssignedDeviceId()
         );
     }
 
@@ -1670,7 +2010,14 @@ public class PatrolController {
             blankToDefault(event.getMessage(), "等待处置"),
             Boolean.TRUE.equals(event.getRecordingAudio()),
             event.getBackupEtaMinutes(),
-            formatDate(event.getCreateTime())
+            formatDate(event.getCreateTime()),
+            event.getAssignedOfficerName(),
+            event.getAssignedBadgeNo(),
+            event.getAssignedDeviceId(),
+            formatDate(event.getReceivedAt()),
+            formatDate(event.getResolvedAt()),
+            event.getResolutionResult(),
+            event.getResolutionNote()
         );
     }
 
@@ -1754,7 +2101,11 @@ public class PatrolController {
         if (value == null || value.isBlank()) {
             return null;
         }
-        return Long.valueOf(value);
+        try {
+            return Long.valueOf(value.trim());
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private String alertType(PatrolAlert alert) {
@@ -1857,6 +2208,11 @@ public class PatrolController {
     }
 
     private AlertAttachmentVo toAlertAttachmentVo(PatrolAlertAttachment attachment) {
+        PatrolMedia media = attachment.getClientFileId() == null || attachment.getClientFileId().isBlank()
+            ? null
+            : mediaMapper.selectOne(new LambdaQueryWrapper<PatrolMedia>()
+                .eq(PatrolMedia::getFileId, attachment.getClientFileId())
+                .last("limit 1"));
         return new AlertAttachmentVo(
             attachment.getAttachmentId(),
             attachment.getAlertId(),
@@ -1866,7 +2222,8 @@ public class PatrolController {
             attachment.getSizeBytes(),
             attachment.getSource(),
             attachment.getLocalUri(),
-            attachment.getUploadIntent()
+            attachment.getUploadIntent(),
+            media != null && media.getOssId() != null
         );
     }
 
@@ -1932,6 +2289,16 @@ public class PatrolController {
                 errors.add(new ImportErrorVo(rowNo, "姓名不能为空"));
                 continue;
             }
+            String normalizedRiskLevel = blankToDefault(riskLevel, "MEDIUM").trim().toUpperCase(Locale.ROOT);
+            if (!SUPPORTED_RISK_LEVELS.contains(normalizedRiskLevel)) {
+                errors.add(new ImportErrorVo(rowNo, "风险等级仅支持 HIGH、MEDIUM 或 LOW"));
+                continue;
+            }
+            Date expiry = parseDate(expiresAt);
+            if (expiry == null || expiry.before(new Date())) {
+                errors.add(new ImportErrorVo(rowNo, "有效期必须是今天或未来的有效日期"));
+                continue;
+            }
             String key = idCardNo.isBlank() ? "NAME:" + name : "ID:" + idCardNo;
             if (!keys.add(key)) {
                 errors.add(new ImportErrorVo(rowNo, "文件内存在重复人员：" + name));
@@ -1948,10 +2315,10 @@ public class PatrolController {
             person.setName(name);
             person.setCategory(blankToDefault(category, "重点关注"));
             person.setIdCardNo(idCardNo);
-            person.setRiskLevel(blankToDefault(riskLevel, "MEDIUM"));
+            person.setRiskLevel(normalizedRiskLevel);
             person.setStatus("ENABLED");
             person.setSource("Excel导入");
-            person.setExpiresAt(parseDate(expiresAt));
+            person.setExpiresAt(expiry);
             person.setRemark(remark);
             if (create) {
                 controlPersonMapper.insert(person);
@@ -1974,7 +2341,7 @@ public class PatrolController {
             }
             total++;
             int rowNo = row.getRowNum() + 1;
-            String plateNo = cell(row, 0).toUpperCase();
+            String plateNo = normalizePlateNo(cell(row, 0));
             String vehicleDesc = cell(row, 1);
             String vehicleType = cell(row, 2);
             String riskLevel = cell(row, 3);
@@ -1982,6 +2349,20 @@ public class PatrolController {
             String remark = cell(row, 5);
             if (plateNo.isBlank()) {
                 errors.add(new ImportErrorVo(rowNo, "车牌号不能为空"));
+                continue;
+            }
+            if (vehicleDesc.isBlank()) {
+                errors.add(new ImportErrorVo(rowNo, "车辆描述不能为空"));
+                continue;
+            }
+            String normalizedRiskLevel = blankToDefault(riskLevel, "MEDIUM").trim().toUpperCase(Locale.ROOT);
+            if (!SUPPORTED_RISK_LEVELS.contains(normalizedRiskLevel)) {
+                errors.add(new ImportErrorVo(rowNo, "风险等级仅支持 HIGH、MEDIUM 或 LOW"));
+                continue;
+            }
+            Date expiry = parseDate(expiresAt);
+            if (expiry == null || expiry.before(new Date())) {
+                errors.add(new ImportErrorVo(rowNo, "有效期必须是今天或未来的有效日期"));
                 continue;
             }
             if (!plateNos.add(plateNo)) {
@@ -1999,12 +2380,12 @@ public class PatrolController {
                 vehicle.setDelFlag("0");
             }
             vehicle.setPlateNo(plateNo);
-            vehicle.setVehicleDesc(blankToDefault(vehicleDesc, "未填写"));
+            vehicle.setVehicleDesc(vehicleDesc);
             vehicle.setVehicleType(vehicleType);
-            vehicle.setRiskLevel(blankToDefault(riskLevel, "MEDIUM"));
+            vehicle.setRiskLevel(normalizedRiskLevel);
             vehicle.setStatus("ENABLED");
             vehicle.setSource("Excel导入");
-            vehicle.setExpiresAt(parseDate(expiresAt));
+            vehicle.setExpiresAt(expiry);
             vehicle.setRemark(remark);
             if (create) {
                 controlVehicleMapper.insert(vehicle);
@@ -2207,6 +2588,48 @@ public class PatrolController {
         sosDispositionMapper.insert(disposition);
     }
 
+    private PatrolSosEvent requireOpenSos(String sosId) {
+        PatrolSosEvent event = sosEventMapper.selectById(sosId);
+        if (event == null) {
+            throw new ServiceException("SOS事件不存在");
+        }
+        if (!isOpenSosPhase(event.getPhase())) {
+            throw new ServiceException("已结束的 SOS 不能继续处置");
+        }
+        return event;
+    }
+
+    private boolean isOpenSosPhase(String phase) {
+        return OPEN_SOS_PHASES.contains(blankToDefault(phase, "").trim().toUpperCase(Locale.ROOT));
+    }
+
+    private void pushIncidentAssignment(String deviceId, String title, String content, String resourceId) {
+        List<MessageRecipient> recipients = resolveMessageRecipients(deviceId, "DEVICE");
+        if (recipients.isEmpty()) {
+            throw new ServiceException("被指派设备尚未绑定有效移动端账号");
+        }
+        Date now = new Date();
+        String messageId = "MSG-" + UUID.randomUUID();
+        PatrolMessage message = new PatrolMessage();
+        message.setMessageId(messageId);
+        message.setTenantId(currentTenantId());
+        message.setTitle(title);
+        message.setContent(content);
+        message.setTargetType("DEVICE");
+        message.setTargetId(deviceId);
+        message.setTargetName(targetName(deviceId, "DEVICE"));
+        message.setChannel("APP");
+        message.setStatus("SENT");
+        message.setReadCount(0);
+        message.setTotalCount(recipients.size());
+        message.setSentAt(now);
+        message.setDelFlag("0");
+        messageMapper.insert(message);
+        saveMessageReceipts(messageId, recipients, now);
+        realtimePublisher.publish("MESSAGE_SENT", "messages", title, content, resourceId,
+            realtimePublisher.payload("messageId", messageId, "targetType", "DEVICE", "targetId", deviceId, "resourceId", resourceId));
+    }
+
     private List<MessageRecipient> resolveMessageRecipients(String targetId, String targetType) {
         List<MessageRecipient> recipients = new ArrayList<>();
         if ("ORG".equals(targetType)) {
@@ -2214,10 +2637,27 @@ public class PatrolController {
             if (deptId == null) {
                 throw new ServiceException("组织目标必须使用有效的组织ID");
             }
-            deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
-                    .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
-                    .eq(PatrolDeviceBinding::getDeptId, deptId))
-                .forEach(binding -> recipients.add(toMessageRecipient(binding, targetId)));
+            SysDept department = sysDeptMapper.selectById(deptId);
+            if (department == null || !"0".equals(department.getStatus())) {
+                throw new ServiceException("消息目标组织不存在或已停用");
+            }
+            sysUserMapper.selectList(new LambdaQueryWrapper<SysUser>()
+                    .eq(SysUser::getDeptId, deptId)
+                    .eq(SysUser::getStatus, "0"))
+                .forEach(user -> {
+                    PatrolDeviceBinding binding = activeBindingByUser(user);
+                    recipients.add(new MessageRecipient(
+                        user.getUserName(),
+                        blankToDefault(user.getNickName(), user.getUserName()),
+                        binding == null ? null : binding.getDeviceId()
+                    ));
+                });
+            if (recipients.isEmpty()) {
+                deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
+                        .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                        .eq(PatrolDeviceBinding::getDeptId, deptId))
+                    .forEach(binding -> recipients.add(toMessageRecipient(binding, targetId)));
+            }
         } else if ("DEVICE".equals(targetType)) {
             PatrolDeviceBinding binding = activeBinding(targetId);
             if (binding == null) {
@@ -2226,10 +2666,19 @@ public class PatrolController {
             recipients.add(toMessageRecipient(binding, targetId));
         } else {
             PatrolDeviceBinding binding = activeBindingByBadgeNo(targetId);
-            if (binding == null) {
-                recipients.add(new MessageRecipient(targetId, targetName(targetId, targetType), null));
-            } else {
+            if (binding != null) {
                 recipients.add(toMessageRecipient(binding, targetId));
+            } else {
+                SysUser user = findActiveMessageTargetUser(targetId);
+                if (user == null) {
+                    throw new ServiceException("目标警员不存在或已停用：" + targetId);
+                }
+                PatrolDeviceBinding userBinding = activeBindingByUser(user);
+                recipients.add(new MessageRecipient(
+                    user.getUserName(),
+                    blankToDefault(user.getNickName(), user.getUserName()),
+                    userBinding == null ? null : userBinding.getDeviceId()
+                ));
             }
         }
         return recipients.stream()
@@ -2272,11 +2721,17 @@ public class PatrolController {
             return device == null ? blankToDefault(targetId, "-") : device.getDeviceName();
         }
         if ("ORG".equals(targetType)) {
-            return blankToDefault(targetId, "-");
+            Long deptId = parseLongOrNull(targetId);
+            SysDept department = deptId == null ? null : sysDeptMapper.selectById(deptId);
+            return department == null ? blankToDefault(targetId, "-") : blankToDefault(department.getDeptName(), targetId);
         }
         if ("SINGLE".equals(targetType) || "OFFICER".equals(targetType)) {
             PatrolDeviceBinding binding = activeBindingByBadgeNo(targetId);
-            return binding == null ? blankToDefault(targetId, "-") : blankToDefault(binding.getNickName(), binding.getUserName());
+            if (binding != null) {
+                return blankToDefault(binding.getNickName(), binding.getUserName());
+            }
+            SysUser user = findActiveMessageTargetUser(targetId);
+            return user == null ? blankToDefault(targetId, "-") : blankToDefault(user.getNickName(), user.getUserName());
         }
         return blankToDefault(targetId, "-");
     }
@@ -2302,6 +2757,41 @@ public class PatrolController {
                 .eq(PatrolDeviceBinding::getBadgeNo, badgeNo)
                 .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
                 .orderByDesc(PatrolDeviceBinding::getBoundAt))
+            .stream()
+            .findFirst()
+            .orElse(null);
+    }
+
+    private PatrolDeviceBinding activeBindingByUser(SysUser user) {
+        if (user == null) {
+            return null;
+        }
+        return deviceBindingMapper.selectList(new LambdaQueryWrapper<PatrolDeviceBinding>()
+                .eq(PatrolDeviceBinding::getBindStatus, "BOUND")
+                .and(wrapper -> wrapper.eq(PatrolDeviceBinding::getUserId, user.getUserId())
+                    .or().eq(PatrolDeviceBinding::getUserName, user.getUserName()))
+                .orderByDesc(PatrolDeviceBinding::getBoundAt))
+            .stream()
+            .findFirst()
+            .orElse(null);
+    }
+
+    private SysUser findActiveMessageTargetUser(String targetId) {
+        if (targetId == null || targetId.isBlank()) {
+            return null;
+        }
+        Long userId;
+        try {
+            userId = Long.valueOf(targetId.trim());
+        } catch (NumberFormatException ignored) {
+            userId = null;
+        }
+        Long finalUserId = userId;
+        return sysUserMapper.selectList(new LambdaQueryWrapper<SysUser>()
+                .eq(SysUser::getStatus, "0")
+                .and(wrapper -> wrapper.eq(SysUser::getUserName, targetId.trim())
+                    .or(finalUserId != null, nested -> nested.eq(SysUser::getUserId, finalUserId)))
+                .last("limit 1"))
             .stream()
             .findFirst()
             .orElse(null);
@@ -2382,6 +2872,127 @@ public class PatrolController {
         }
     }
 
+    private void validateAppVersionRequest(AppVersionBo bo) {
+        if (bo == null) {
+            throw new ServiceException("App 版本信息不能为空");
+        }
+        if (bo.versionCode() == null || bo.versionCode() <= 0) {
+            throw new ServiceException("App versionCode 必须大于 0");
+        }
+        if (bo.versionName() == null || bo.versionName().isBlank()) {
+            throw new ServiceException("App 版本名称不能为空");
+        }
+        if (bo.changelog() == null || bo.changelog().isBlank()) {
+            throw new ServiceException("App 更新日志不能为空");
+        }
+        if (bo.fileId() == null || bo.fileId().isBlank()) {
+            throw new ServiceException("请先上传 APK 安装包");
+        }
+    }
+
+    private void validateFirmwareVersionRequest(FirmwareVersionBo bo) {
+        if (bo == null) {
+            throw new ServiceException("固件版本信息不能为空");
+        }
+        String deviceType = blankToDefault(bo.deviceType(), "").trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("GLASSES", "HEADSET").contains(deviceType)) {
+            throw new ServiceException("设备类型仅支持 GLASSES 或 HEADSET");
+        }
+        if (bo.versionCode() == null || bo.versionCode() <= 0) {
+            throw new ServiceException("固件排序版本号必须大于 0");
+        }
+        if (bo.versionName() == null || bo.versionName().isBlank()) {
+            throw new ServiceException("固件版本名称不能为空");
+        }
+        if (bo.changelog() == null || bo.changelog().isBlank()) {
+            throw new ServiceException("固件更新日志不能为空");
+        }
+        if (bo.fileId() == null || bo.fileId().isBlank()) {
+            throw new ServiceException("请先上传固件包");
+        }
+        String firmwareType = blankToDefault(bo.firmwareType(), "FULL").trim().toUpperCase(Locale.ROOT);
+        if (!"FULL".equals(firmwareType)) {
+            throw new ServiceException("当前固件链路仅支持完整包 FULL，暂不支持差分包");
+        }
+        String upgradeMode = blankToDefault(bo.upgradeMode(), "APP_BLE").trim().toUpperCase(Locale.ROOT);
+        if (!"APP_BLE".equals(upgradeMode)) {
+            throw new ServiceException("当前固件链路仅支持 Android App 通过 BLE 升级");
+        }
+        String grayScope = FirmwareRolloutPolicy.normalizeScope(bo.grayScope());
+        if (!FirmwareRolloutPolicy.isSupportedScope(grayScope)) {
+            throw new ServiceException("固件发布范围仅支持 ALL 或 DEVICES");
+        }
+        if (FirmwareRolloutPolicy.DEVICES.equals(grayScope) && FirmwareRolloutPolicy.targets(bo.grayTargets()).isEmpty()) {
+            throw new ServiceException("指定设备灰度必须填写至少一个设备编号");
+        }
+        if (FirmwareRolloutPolicy.DEVICES.equals(grayScope)) {
+            List<String> missingDevices = FirmwareRolloutPolicy.targets(bo.grayTargets()).stream()
+                .filter(deviceId -> deviceMapper.selectById(deviceId) == null)
+                .toList();
+            if (!missingDevices.isEmpty()) {
+                throw new ServiceException("灰度设备不存在：" + String.join(",", missingDevices));
+            }
+        }
+    }
+
+    private String normalizeReleaseStatus(StatusBo bo) {
+        String status = bo == null ? "" : blankToDefault(bo.status(), "").trim().toUpperCase(Locale.ROOT);
+        if (!SUPPORTED_RELEASE_STATUSES.contains(status)) {
+            throw new ServiceException("版本状态仅支持 PUBLISHED 或 DISABLED");
+        }
+        return status;
+    }
+
+    private void validateControlPersonRequest(ControlPersonBo bo) {
+        if (bo == null || bo.name() == null || bo.name().isBlank()) {
+            throw new ServiceException("人员姓名不能为空");
+        }
+        if (bo.category() == null || bo.category().isBlank()) {
+            throw new ServiceException("人员布控类别不能为空");
+        }
+        String riskLevel = blankToDefault(bo.riskLevel(), "").trim().toUpperCase(Locale.ROOT);
+        if (!SUPPORTED_RISK_LEVELS.contains(riskLevel)) {
+            throw new ServiceException("风险等级仅支持 HIGH、MEDIUM 或 LOW");
+        }
+        validateExpiry(bo.expiresAt());
+    }
+
+    private void validateControlVehicleRequest(ControlVehicleBo bo) {
+        if (bo == null || normalizePlateNo(bo.plateNo()).isBlank()) {
+            throw new ServiceException("车牌号码不能为空");
+        }
+        if (bo.vehicleDesc() == null || bo.vehicleDesc().isBlank()) {
+            throw new ServiceException("车辆描述不能为空");
+        }
+        String riskLevel = blankToDefault(bo.riskLevel(), "").trim().toUpperCase(Locale.ROOT);
+        if (!SUPPORTED_RISK_LEVELS.contains(riskLevel)) {
+            throw new ServiceException("风险等级仅支持 HIGH、MEDIUM 或 LOW");
+        }
+        validateExpiry(bo.expiresAt());
+    }
+
+    private String normalizeControlStatus(StatusBo bo) {
+        String status = bo == null ? "" : blankToDefault(bo.status(), "").trim().toUpperCase(Locale.ROOT);
+        if (!SUPPORTED_CONTROL_STATUSES.contains(status)) {
+            throw new ServiceException("布控状态仅支持 ENABLED 或 DISABLED");
+        }
+        return status;
+    }
+
+    private void validateExpiry(String expiresAt) {
+        Date expires = parseDate(expiresAt);
+        if (expires == null) {
+            throw new ServiceException("请填写有效的布控截止日期");
+        }
+        if (expires.before(new Date())) {
+            throw new ServiceException("布控截止日期不能早于当前时间");
+        }
+    }
+
+    private String normalizePlateNo(String plateNo) {
+        return blankToDefault(plateNo, "").replace("·", "").replaceAll("\\s+", "").trim().toUpperCase(Locale.ROOT);
+    }
+
     private String blankToDefault(String value, String defaultValue) {
         return value == null || value.isBlank() ? defaultValue : value;
     }
@@ -2402,6 +3013,108 @@ public class PatrolController {
             return "ufw";
         }
         return "bin";
+    }
+
+    private ApkPackageMetadata validateApkPackage(MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            throw new ServiceException("APK 安装包不能为空");
+        }
+        boolean hasManifest = false;
+        boolean hasDex = false;
+        try (ZipInputStream input = new ZipInputStream(file.getInputStream())) {
+            ZipEntry entry;
+            while ((entry = input.getNextEntry()) != null) {
+                String entryName = entry.getName();
+                if ("AndroidManifest.xml".equals(entryName)) {
+                    hasManifest = true;
+                }
+                if (entryName != null && entryName.matches("classes(?:\\d+)?\\.dex")) {
+                    hasDex = true;
+                }
+                if (hasManifest && hasDex) {
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            throw new ServiceException("APK 安装包无法解析：" + e.getMessage());
+        }
+        if (!hasManifest || !hasDex) {
+            throw new ServiceException("APK 安装包无法解析或缺少 AndroidManifest/classes.dex");
+        }
+        Path temporaryApk = null;
+        try {
+            temporaryApk = Files.createTempFile("patrollink-apk-", ".apk");
+            try (InputStream input = file.getInputStream()) {
+                Files.copy(input, temporaryApk, StandardCopyOption.REPLACE_EXISTING);
+            }
+            try (ApkFile apkFile = new ApkFile(temporaryApk.toFile())) {
+                ApkMeta metadata = apkFile.getApkMeta();
+                String packageName = blankToDefault(metadata.getPackageName(), "").trim();
+                Long versionCode = metadata.getVersionCode();
+                String versionName = blankToDefault(metadata.getVersionName(), "").trim();
+                if (!PATROL_LINK_ANDROID_PACKAGE.equals(packageName)) {
+                    throw new ServiceException("APK applicationId 不匹配，应为 " + PATROL_LINK_ANDROID_PACKAGE);
+                }
+                if (versionCode == null || versionCode <= 0 || versionCode > Integer.MAX_VALUE) {
+                    throw new ServiceException("APK versionCode 不合法");
+                }
+                if (versionName.isBlank()) {
+                    throw new ServiceException("APK versionName 不能为空");
+                }
+                return new ApkPackageMetadata(packageName, versionCode.intValue(), versionName);
+            }
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ServiceException("APK 包信息解析失败：" + e.getMessage());
+        } finally {
+            if (temporaryApk != null) {
+                try {
+                    Files.deleteIfExists(temporaryApk);
+                } catch (IOException ignored) {
+                    // 临时文件由操作系统后续清理，不影响上传结果。
+                }
+            }
+        }
+    }
+
+    private void validateZipPackage(MultipartFile file, String message) {
+        if (file == null || file.isEmpty()) {
+            throw new ServiceException(message);
+        }
+        try (ZipInputStream input = new ZipInputStream(file.getInputStream())) {
+            ZipEntry entry;
+            while ((entry = input.getNextEntry()) != null) {
+                if (!entry.isDirectory()) {
+                    return;
+                }
+            }
+        } catch (IOException e) {
+            throw new ServiceException(message + "：" + e.getMessage());
+        }
+        throw new ServiceException(message);
+    }
+
+    private void validateImageFile(MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            throw new ServiceException("图片文件不能为空");
+        }
+        try (InputStream input = file.getInputStream()) {
+            byte[] header = input.readNBytes(12);
+            boolean jpeg = header.length >= 3
+                && (header[0] & 0xff) == 0xff && (header[1] & 0xff) == 0xd8 && (header[2] & 0xff) == 0xff;
+            boolean png = header.length >= 8
+                && (header[0] & 0xff) == 0x89 && header[1] == 0x50 && header[2] == 0x4e && header[3] == 0x47
+                && header[4] == 0x0d && header[5] == 0x0a && header[6] == 0x1a && header[7] == 0x0a;
+            boolean webp = header.length >= 12
+                && header[0] == 0x52 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x46
+                && header[8] == 0x57 && header[9] == 0x45 && header[10] == 0x42 && header[11] == 0x50;
+            if (!jpeg && !png && !webp) {
+                throw new ServiceException("图片内容无法识别，请上传真实 JPG/PNG/WebP 文件");
+            }
+        } catch (IOException e) {
+            throw new ServiceException("读取图片内容失败：" + e.getMessage());
+        }
     }
 
     private String sha256(MultipartFile file) {
@@ -2443,7 +3156,7 @@ public class PatrolController {
     public record MetricVo(String label, String value, String note, String type) {
     }
 
-    public record WorkItemVo(String id, String title, String officer, String source, String status, String level, String timeText) {
+    public record WorkItemVo(String id, String module, String title, String officer, String source, String status, String level, String timeText) {
     }
 
     public record PlatformCapacityVo(Integer pilotOfficerCount, Integer pilotDeviceCount, Integer maxVideoChannels, String videoWallLayouts, String mapProvider, String algorithmProvider) {
@@ -2500,7 +3213,10 @@ public class PatrolController {
     public record PatrolAreaUserOptionVo(String userId, String userName, String displayName, String departmentId, String departmentName) {
     }
 
-    public record AlertVo(String alertId, String alertType, String title, String targetName, String deviceId, String officerName, String locationText, String status, String level, String confidence, String occurredAt) {
+    public record AlertVo(String alertId, String alertType, String title, String targetName, String deviceId, String officerName, String locationText, Double latitude, Double longitude, String status, String level, String confidence, String occurredAt, String assignedOfficerName, String assignedBadgeNo, String assignedDeviceId) {
+    }
+
+    public record AlertAssignBo(String officerName, String badgeNo, String deviceId, String note) {
     }
 
     public record AlertCloseBo(String result, String note, List<AlertAttachmentBo> attachments) {
@@ -2509,7 +3225,7 @@ public class PatrolController {
     public record AlertAttachmentBo(String clientFileId, String fileName, String mimeType, Long sizeBytes, String source, String localUri, String uploadIntent) {
     }
 
-    public record AlertAttachmentVo(String attachmentId, String alertId, String clientFileId, String fileName, String mimeType, Long sizeBytes, String source, String localUri, String uploadIntent) {
+    public record AlertAttachmentVo(String attachmentId, String alertId, String clientFileId, String fileName, String mimeType, Long sizeBytes, String source, String localUri, String uploadIntent, Boolean downloadAvailable) {
     }
 
     public record AlertDispositionVo(String dispositionId, String alertId, String actionType, String actionResult, String operatorName, String note, Integer attachmentsCount, String occurredAt) {
@@ -2536,7 +3252,10 @@ public class PatrolController {
     public record AppVersionVo(String versionId, Integer versionCode, String versionName, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId, String status, String publishedAt) {
     }
 
-    public record AppVersionPackageVo(String fileId, String fileName, String downloadUrl, String sha256, Long fileSizeBytes, String sizeText) {
+    public record AppVersionPackageVo(String fileId, String fileName, String downloadUrl, String sha256, Long fileSizeBytes, String sizeText, String packageName, Integer versionCode, String versionName) {
+    }
+
+    public record ApkPackageMetadata(String packageName, Integer versionCode, String versionName) {
     }
 
     public record AppVersionBo(Integer versionCode, String versionName, Boolean forceUpdate, String changelog, String downloadUrl, String sha256, String fileId) {
@@ -2554,7 +3273,7 @@ public class PatrolController {
     public record FirmwareUpgradeTaskVo(String taskId, String deviceId, String firmwareId, String operatorId, String fromVersion, String toVersion, String status, Float progress, String errorCode, String errorMessage, String startedAt, String finishedAt) {
     }
 
-    public record SosVo(String sosId, String officerName, String badgeNo, String deptName, String deviceId, String locationText, Double latitude, Double longitude, Float accuracyMeters, String status, String disposition, Boolean recordingAudio, Integer backupEtaMinutes, String createdAt) {
+    public record SosVo(String sosId, String officerName, String badgeNo, String deptName, String deviceId, String locationText, Double latitude, Double longitude, Float accuracyMeters, String status, String disposition, Boolean recordingAudio, Integer backupEtaMinutes, String createdAt, String assignedOfficerName, String assignedBadgeNo, String assignedDeviceId, String receivedAt, String resolvedAt, String resolutionResult, String resolutionNote) {
     }
 
     public record SosActionVo(String sosId, String status, String message) {
@@ -2563,13 +3282,16 @@ public class PatrolController {
     public record SosTimelineVo(String dispositionId, String sosId, String actionType, String actionResult, String operatorName, String note, String contactName, String contactPhone, String attachmentFileId, String attachmentFileName, Integer backupEtaMinutes, String occurredAt) {
     }
 
-    public record SosBackupBo(String contactName, String contactPhone, Integer backupEtaMinutes, String note) {
+    public record SosBackupBo(String contactName, String contactPhone, String badgeNo, String deviceId, Integer backupEtaMinutes, String note) {
     }
 
     public record SosContactBo(String contactName, String contactPhone, String note) {
     }
 
     public record SosNoteBo(String note) {
+    }
+
+    public record SosCloseBo(String result, String note) {
     }
 
     public record MessageBo(String targetId, String targetType, String title, String content) {
